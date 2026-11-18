@@ -34,52 +34,20 @@ import argparse
 import csv
 import os
 import time
+import warnings
+from multiprocessing import Pool
 
 import gym
 import numpy as np
 
 from f110_gym.envs.base_classes import Integrator, RaceCar
-from nn_controller import HERE, NUM_BEAMS, SPEED_MAX, NNController, load_tracks
+from nn_controller import HERE, NNController, load_tracks
+from scoring import ScoreKeeper
 
 
 MAP = "Budapest"
 NUM_AGENTS = 10
 TIMESTEP = 0.01  # s, env physics step
-
-# Score. Each step earns up to SCORE_PER_STEP for distance covered (the full
-# amount at SPEED_MAX), minus small penalties for bad speed choices.
-SCORE_PER_STEP = 1.0
-A_MAX = 9.51  # m/s^2, env's max acceleration; used to normalise deceleration
-LIDAR_FOV = 4.7  # rad, env's default scan field of view
-FRONT_HALF_ANGLE = np.radians(10)  # beams within this of straight ahead count as "ahead"
-BRAKE_DECEL = 6.0  # m/s^2, braking assumed when working out a safe speed
-STOP_MARGIN = 0.5  # m, gap to leave in front of the car when stopped
-STRAIGHT_CLEARANCE = 10.0  # m, free space ahead that counts as a straight
-FAST_PENALTY = 0.3  # per step, at a full SPEED_MAX over the safe speed
-SLOW_PENALTY = 0.3  # per step, braking at A_MAX on a straight
-CRASH_FACTOR = 0.5  # a crash keeps this fraction of the score
-
-_front = int(FRONT_HALF_ANGLE / LIDAR_FOV * NUM_BEAMS)
-FRONT_BEAMS = slice(NUM_BEAMS // 2 - _front, NUM_BEAMS // 2 + _front + 1)
-
-
-def step_score(scans, speed, prev_speed, step_dist):
-    """Score earned this step by each car (arrays over cars).
-
-    Free space straight ahead in the LiDAR tells a turn from a straight: a wall
-    close ahead means a turn is coming. Too fast is faster than the car could
-    stop in that space; on a straight, any braking is penalised.
-    """
-    ahead = scans[:, FRONT_BEAMS].min(axis=1)
-    progress = SCORE_PER_STEP * step_dist / (SPEED_MAX * TIMESTEP)
-
-    safe_speed = np.sqrt(2 * BRAKE_DECEL * np.maximum(ahead - STOP_MARGIN, 0.0))
-    too_fast = np.clip((speed - safe_speed) / SPEED_MAX, 0.0, 1.0)
-
-    decel = np.clip((prev_speed - speed) / (A_MAX * TIMESTEP), 0.0, 1.0)
-    slowing_on_straight = np.where(ahead > STRAIGHT_CLEARANCE, decel, 0.0)
-
-    return progress - FAST_PENALTY * too_fast - SLOW_PENALTY * slowing_on_straight
 
 # Car colours in the render window (RGB).
 LEADER_COLOUR = (255, 140, 0)
@@ -177,15 +145,11 @@ def race(env, controllers, start_pose, max_steps, render):
     for c in controllers:
         c.reset()
 
-    alive = np.ones(n, dtype=bool)
-    death_time = np.full(n, np.nan)
-    distance = np.zeros(n)
-    score = np.zeros(n)
-    speeds = [[] for _ in range(n)]
-    xy = np.column_stack([obs['poses_x'], obs['poses_y']])
-    speed = np.abs(np.asarray(obs['linear_vels_x'], dtype=np.float64))
+    scorer = ScoreKeeper(n, obs, TIMESTEP)
+    alive = scorer.alive
     # Shared with the render callback; the arrays are updated in place.
-    view = env.unwrapped.view = {'alive': alive, 'distance': distance, 'time': 0.0, 'score': score}
+    view = env.unwrapped.view = {'alive': alive, 'distance': scorer.distance, 'time': 0.0,
+                                 'score': scorer.score}
 
     sim_time = 0.0
     steps = 0
@@ -198,20 +162,7 @@ def race(env, controllers, start_pose, max_steps, render):
         sim_time += step_reward
         steps += 1
 
-        new_xy = np.column_stack([obs['poses_x'], obs['poses_y']])
-        step_dist = np.linalg.norm(new_xy - xy, axis=1)
-        distance[alive] += step_dist[alive]
-        xy = new_xy
-        prev_speed = speed
-        speed = np.abs(np.asarray(obs['linear_vels_x'], dtype=np.float64))
-        scans = np.asarray(obs['scans'], dtype=np.float64)
-        score[alive] += step_score(scans, speed, prev_speed, step_dist)[alive]
-        for i in np.flatnonzero(alive):
-            speeds[i].append(speed[i])
-            if obs['collisions'][i]:
-                alive[i] = False
-                death_time[i] = sim_time
-                score[i] *= CRASH_FACTOR
+        scorer.step(obs, sim_time)
         if render:
             view['time'] = sim_time
             try:
@@ -223,19 +174,121 @@ def race(env, controllers, start_pose, max_steps, render):
                 render = False
                 break
 
-    results = []
-    for i in range(n):
-        crashed = not np.isnan(death_time[i])
-        results.append({
-            'score': round(score[i], 3),
-            'crashed': crashed,
-            'death_time_s': round(death_time[i], 3) if crashed else '',
-            'sim_time_s': round(death_time[i] if crashed else sim_time, 3),
-            'distance_m': round(distance[i], 3),
-            'median_speed_mps': round(float(np.median(speeds[i])), 3) if speeds[i] else 0.0,
-            'laps': int(obs['lap_counts'][i]),
-        })
-    return results, render
+    return scorer.results(obs, sim_time), render
+
+
+def show_best(params, hidden, track, all_tracks, max_steps):
+    """Render one car on one track; the window stays up until closed."""
+    print(f'\nShowing the final best car on {track}. Close the window to exit.')
+    c = NNController(hidden=hidden)
+    c.net.set_params(params)
+    map_path, start_pose = all_tracks[track]
+    env = make_ghost_env(map_path, 1)
+    add_race_view(env)
+    (r,), window_open = race(env, [c], start_pose, max_steps, render=True)
+    print(f'{track}: score {r["score"]:.1f}  {"crashed" if r["crashed"] else "survived"}  '
+          f'dist={r["distance_m"]:.1f}m  laps={r["laps"]}')
+    if window_open:
+        try:
+            while True:
+                env.render(mode='human')
+        except Exception as ex:
+            if not is_window_closed(ex):
+                raise
+
+
+def write_population(path, params, hidden):
+    """Save flat parameter vectors (one row per car) in the weights.npz format."""
+    controllers = []
+    for p in params:
+        c = NNController(hidden=hidden)
+        c.net.set_params(p)
+        controllers.append(c)
+    save_weights(path, controllers, list(range(len(controllers))))
+
+
+def best_from_saved(path):
+    """Params of the best car in a saved weights.npz (by results.csv next to it, if any)."""
+    controllers, _ = load_population(path)
+    hidden = tuple(np.load(path)['layer_sizes'][1:-1])
+    best = 0
+    results_csv = os.path.join(os.path.dirname(path), 'results.csv')
+    if len(controllers) > 1 and os.path.exists(results_csv):
+        with open(results_csv, newline='') as f:
+            scores = [float(r['score']) for r in csv.DictReader(f)]
+        best = int(np.argmax(scores))
+    return controllers[best].net.get_params(), hidden
+
+
+# Each worker process keeps its envs between calls so a track's map is only
+# loaded once per group. The cache is dropped when the group changes.
+_envs = {}
+_envs_group = None
+
+
+def _quiet_worker():
+    # Every env build warns that RK4 is the integrator; once is plenty.
+    warnings.filterwarnings('ignore', message='Chosen integrator is RK4')
+
+
+def _race_track(job):
+    """Race a chunk of the population on one track. Runs in a worker process."""
+    global _envs_group
+    group, track, lo, map_path, start_pose, params, hidden, max_steps = job
+    if group != _envs_group:
+        _envs.clear()
+        _envs_group = group
+    n = len(params)
+    if (map_path, n) not in _envs:
+        _envs[(map_path, n)] = make_ghost_env(map_path, n)
+    env = _envs[(map_path, n)]
+
+    controllers = []
+    for p in params:
+        c = NNController(hidden=hidden)
+        c.net.set_params(p)
+        controllers.append(c)
+    results, _ = race(env, controllers, start_pose, max_steps, render=False)
+    return track, lo, results
+
+
+def choose_workers(requested, n_races):
+    """Worker count: `requested`, or 75% of the CPU threads when 0 (at least 1).
+
+    More workers than car-races would only sit idle.
+    """
+    default = max(1, (os.cpu_count() or 1) * 3 // 4)
+    return min(requested or default, n_races)
+
+
+def make_pool(workers):
+    return Pool(workers, initializer=_quiet_worker)
+
+
+def split_jobs(n_cars, n_tracks, workers):
+    """Slices (lo, hi) of the population that each track is split into.
+
+    The work is n_cars * n_tracks car-races, shared as evenly as possible over
+    the workers: each job races cars_per_job cars on one track (a job cannot
+    span tracks, since it runs in one env).
+    """
+    cars_per_job = -(-n_cars * n_tracks // workers)  # ceil
+    bounds = np.linspace(0, n_cars, -(-n_cars // cars_per_job) + 1).astype(int)
+    return list(zip(bounds[:-1], bounds[1:]))
+
+
+def race_tracks(pool, group, tracks, all_tracks, params, hidden, max_steps, workers):
+    """Race every car on every track; returns {track: [result per car]}.
+
+    The cars are ghosts to each other, so splitting them across processes does
+    not change any car's result, only how many cores share the work.
+    """
+    jobs = [(group, t, lo, *all_tracks[t], params[lo:hi], hidden, max_steps)
+            for t in tracks for lo, hi in split_jobs(len(params), len(tracks), workers)]
+    per_track = {t: [None] * len(params) for t in tracks}
+    for t, lo, results in pool.imap_unordered(_race_track, jobs):
+        per_track[t][lo:lo + len(results)] = results
+    return per_track
 
 
 def main():
