@@ -69,6 +69,7 @@ from scoring import combine_scores
 from testing_env import (TIMESTEP, best_from_saved, choose_workers, make_pool,
                          make_population, race_tracks, show_best, split_jobs,
                          write_population)
+from config import get_config
 
 
 def fail(msg):
@@ -194,7 +195,7 @@ def run_test(pool, cache_key, cycle, gen, params, hidden, test_tracks, all_track
 
 
 def main():
-    args = SimpleNamespace(**get_config())
+    args = get_config()
     all_tracks = load_tracks()
     test_tracks = args.test_tracks
     track_names = check_config(args, all_tracks)
