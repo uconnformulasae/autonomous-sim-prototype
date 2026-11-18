@@ -13,7 +13,7 @@ Outputs, in runs/<track>_<timestamp>/:
     weights.npz  params      (n, P) flat weights+biases per car, as MLP.get_params()
                  layer_sizes layer sizes of the MLP, to rebuild it
                  seeds       weight-init seed per car
-    results.csv  car, seed, crashed, death_time_s, sim_time_s, distance_m,
+    results.csv  car, seed, score, crashed, death_time_s, sim_time_s, distance_m,
                  median_speed_mps, laps
 
     death_time_s is the sim time of the crash, empty if the car never crashed
@@ -38,13 +38,48 @@ import time
 import gym
 import numpy as np
 
-from f110_gym.envs.base_classes import Integrator
-from nn_controller import HERE, NNController, load_tracks
+from f110_gym.envs.base_classes import Integrator, RaceCar
+from nn_controller import HERE, NUM_BEAMS, SPEED_MAX, NNController, load_tracks
 
 
 MAP = "Budapest"
 NUM_AGENTS = 10
 TIMESTEP = 0.01  # s, env physics step
+
+# Score. Each step earns up to SCORE_PER_STEP for distance covered (the full
+# amount at SPEED_MAX), minus small penalties for bad speed choices.
+SCORE_PER_STEP = 1.0
+A_MAX = 9.51  # m/s^2, env's max acceleration; used to normalise deceleration
+LIDAR_FOV = 4.7  # rad, env's default scan field of view
+FRONT_HALF_ANGLE = np.radians(10)  # beams within this of straight ahead count as "ahead"
+BRAKE_DECEL = 6.0  # m/s^2, braking assumed when working out a safe speed
+STOP_MARGIN = 0.5  # m, gap to leave in front of the car when stopped
+STRAIGHT_CLEARANCE = 10.0  # m, free space ahead that counts as a straight
+FAST_PENALTY = 0.3  # per step, at a full SPEED_MAX over the safe speed
+SLOW_PENALTY = 0.3  # per step, braking at A_MAX on a straight
+CRASH_FACTOR = 0.5  # a crash keeps this fraction of the score
+
+_front = int(FRONT_HALF_ANGLE / LIDAR_FOV * NUM_BEAMS)
+FRONT_BEAMS = slice(NUM_BEAMS // 2 - _front, NUM_BEAMS // 2 + _front + 1)
+
+
+def step_score(scans, speed, prev_speed, step_dist):
+    """Score earned this step by each car (arrays over cars).
+
+    Free space straight ahead in the LiDAR tells a turn from a straight: a wall
+    close ahead means a turn is coming. Too fast is faster than the car could
+    stop in that space; on a straight, any braking is penalised.
+    """
+    ahead = scans[:, FRONT_BEAMS].min(axis=1)
+    progress = SCORE_PER_STEP * step_dist / (SPEED_MAX * TIMESTEP)
+
+    safe_speed = np.sqrt(2 * BRAKE_DECEL * np.maximum(ahead - STOP_MARGIN, 0.0))
+    too_fast = np.clip((speed - safe_speed) / SPEED_MAX, 0.0, 1.0)
+
+    decel = np.clip((prev_speed - speed) / (A_MAX * TIMESTEP), 0.0, 1.0)
+    slowing_on_straight = np.where(ahead > STRAIGHT_CLEARANCE, decel, 0.0)
+
+    return progress - FAST_PENALTY * too_fast - SLOW_PENALTY * slowing_on_straight
 
 # Car colours in the render window (RGB).
 LEADER_COLOUR = (255, 140, 0)
@@ -72,7 +107,7 @@ def add_race_view(env):
         y = e.cars[leader].vertices[1::2]
         top, bottom, left, right = max(y), min(y), min(x), max(x)
         e.score_label.text = (f'Time: {v["time"]:.2f}s  Running: {alive.sum()}/{len(alive)}  '
-                              f'Leader: car {leader} ({distance[leader]:.1f} m)')
+                              f'Leader: car {leader} ({distance[leader]:.1f} m, score {v["score"][leader]:.0f})')
         e.score_label.x = left
         e.score_label.y = top - 700
         e.left, e.right = left - 800, right + 800
@@ -107,8 +142,14 @@ def save_weights(path, controllers, seeds):
 
 def make_ghost_env(map_path, n):
     """n-car env where the cars cannot collide with or see each other."""
+    # RaceCar keeps one LiDAR simulator (and so one map) for the whole process,
+    # and every new env loads its map into it. Clearing it first gives this env
+    # a simulator of its own, which race() swaps back in, so envs for different
+    # tracks can live in one process without racing on each other's maps.
+    RaceCar.scan_simulator = None
     env = gym.make('f110_gym:f110-v0', map=map_path, map_ext='.png',
                    num_agents=n, timestep=TIMESTEP, integrator=Integrator.RK4)
+    env.unwrapped.scan_simulator = RaceCar.scan_simulator
     sim = env.unwrapped.sim
 
     # Car-to-car collisions: replace the GJK check with "nobody touching".
@@ -131,6 +172,7 @@ def race(env, controllers, start_pose, max_steps, render):
     was closed, which also ends the race early.
     """
     n = len(controllers)
+    RaceCar.scan_simulator = env.unwrapped.scan_simulator  # this env's map; see make_ghost_env
     obs, _, _, _ = env.reset(np.array([start_pose] * n))
     for c in controllers:
         c.reset()
@@ -138,10 +180,12 @@ def race(env, controllers, start_pose, max_steps, render):
     alive = np.ones(n, dtype=bool)
     death_time = np.full(n, np.nan)
     distance = np.zeros(n)
+    score = np.zeros(n)
     speeds = [[] for _ in range(n)]
     xy = np.column_stack([obs['poses_x'], obs['poses_y']])
+    speed = np.abs(np.asarray(obs['linear_vels_x'], dtype=np.float64))
     # Shared with the render callback; the arrays are updated in place.
-    view = env.unwrapped.view = {'alive': alive, 'distance': distance, 'time': 0.0}
+    view = env.unwrapped.view = {'alive': alive, 'distance': distance, 'time': 0.0, 'score': score}
 
     sim_time = 0.0
     steps = 0
@@ -155,13 +199,19 @@ def race(env, controllers, start_pose, max_steps, render):
         steps += 1
 
         new_xy = np.column_stack([obs['poses_x'], obs['poses_y']])
-        distance[alive] += np.linalg.norm(new_xy - xy, axis=1)[alive]
+        step_dist = np.linalg.norm(new_xy - xy, axis=1)
+        distance[alive] += step_dist[alive]
         xy = new_xy
+        prev_speed = speed
+        speed = np.abs(np.asarray(obs['linear_vels_x'], dtype=np.float64))
+        scans = np.asarray(obs['scans'], dtype=np.float64)
+        score[alive] += step_score(scans, speed, prev_speed, step_dist)[alive]
         for i in np.flatnonzero(alive):
-            speeds[i].append(abs(obs['linear_vels_x'][i]))
+            speeds[i].append(speed[i])
             if obs['collisions'][i]:
                 alive[i] = False
                 death_time[i] = sim_time
+                score[i] *= CRASH_FACTOR
         if render:
             view['time'] = sim_time
             try:
@@ -177,6 +227,7 @@ def race(env, controllers, start_pose, max_steps, render):
     for i in range(n):
         crashed = not np.isnan(death_time[i])
         results.append({
+            'score': round(score[i], 3),
             'crashed': crashed,
             'death_time_s': round(death_time[i], 3) if crashed else '',
             'sim_time_s': round(death_time[i] if crashed else sim_time, 3),
@@ -226,7 +277,7 @@ def main():
     raced, window_open = race(env, controllers, start_pose, max_steps, render)
     results = [{'car': i, 'seed': seed, **r} for i, (seed, r) in enumerate(zip(seeds, raced))]
     for r in results:
-        print(f"car {r['car']:3d}  {'crashed' if r['crashed'] else 'survived':8s}  "
+        print(f"car {r['car']:3d}  score={r['score']:8.1f}  {'crashed' if r['crashed'] else 'survived':8s}  "
               f"t={r['sim_time_s']:7.2f}s  dist={r['distance_m']:7.2f}m  "
               f"median v={r['median_speed_mps']:5.2f}m/s  laps={r['laps']}")
 
@@ -235,8 +286,8 @@ def main():
         writer.writeheader()
         writer.writerows(results)
 
-    best = max(results, key=lambda r: r['distance_m'])
-    print(f"\nBest: car {best['car']} went {best['distance_m']} m. Saved to {run_dir}")
+    best = max(results, key=lambda r: r['score'])
+    print(f"\nBest: car {best['car']} scored {best['score']} ({best['distance_m']} m). Saved to {run_dir}")
 
     # Keep the final frame up until the window is closed.
     if window_open:
