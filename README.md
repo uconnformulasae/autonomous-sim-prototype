@@ -14,10 +14,10 @@ F1TENTH is a lightweight simulator that handles the vehicle physics, so you can 
 
 | Requirement | Notes |
 |---|---|
-| Python 3.10 | 3.8 to 3.10 work. **Do not use 3.11 or newer** (including the 3.12/3.13 that many systems ship with): the simulator needs `gym<0.24` and `numpy<2`, which do not support them. Download 3.10 from <https://www.python.org/downloads/> (on Windows, tick "Add python.exe to PATH" or keep the `py` launcher option on). |
+| Python 3.10 | **Do not use 3.11 or newer** (including the 3.12/3.13 that many systems ship with): the simulator needs `gym<0.24` and `numpy<2`, which do not support them. Download 3.10 from <https://www.python.org/downloads/> (on Windows, tick "Add python.exe to PATH" or keep the `py` launcher option on). |
 | `git` | To clone the repository. |
 
-Nothing else needs installing: the virtual environment is made with Python's built-in `venv` module (not `virtualenv`, which is not installed by default).
+Nothing else needs installing: the virtual environment is made with Python's built-in `venv` module.
 
 ## Quick Start
 
@@ -70,14 +70,14 @@ This races 10 random cars on one track in a render window. Add `--headless` for 
 | Train with the config | `python genetic_sim\run.py` |
 | Grid search over `get_grid()`, ranked on the validation tracks | `python genetic_sim\run.py --grid` |
 
-Results are written to `genetic_sim/runs/`. If a script cannot find its map or data files, `cd genetic_sim` first and run it from there.
-
+Results are written to `genetic_sim/runs/`.
 ## Documentation
 
 ### Read Write-ups
 Formal written documentation for this project can be found in docs/writeups. 
 * [Autonomous Car Guidelines](<docs/writeups/Autonomous Car Guidelines.pdf>): UConn FSAE's autonomous vehicle initiative overview
-* [CSE 4820 Project Proposal](docs/writeups/CSE_4820_Course_Project_Proposal.pdf): Our team's project proposal (this is also doubling as a class project) 
+* [CSE 4820 Project Proposal](docs/writeups/CSE_4820_Course_Project_Proposal.pdf): Our team's project proposal (this is also doubling as a class project)
+* [CSE 4820 Project Progress Report](docs/writeups/CSE_4820_Course_Project_Progress_report.pdf): Our team's project progress report
 
 ### Viewing Doxygen Code Documentation
 
@@ -98,10 +98,9 @@ You can also double-click `index.html` in Finder or File Explorer. If search or 
 | Issue | Fix |
 |---|---|
 | `command not found` / "not recognized" (e.g., `git`, `py`, `python3.10`) | Install the missing prerequisite and make sure it is on your `PATH`. `py` only exists on Windows when Python came from python.org. |
-| `No module named virtualenv` / `virtualenv` not recognized | Not needed. Use `python -m venv` as in step 2. |
 | PowerShell: "running scripts is disabled" when activating | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then activate again (or use `activate.bat` in cmd). |
 | `Numba needs NumPy 2.3 or less`, or pip fails building `numpy`/`pyglet`/`gym` | The environment is on a Python that is too new. Check `python --version`; recreate it with Python 3.10. |
 | `No module named 'gym'` / `f110_gym` | The environment is not active, or `pip install -e .` was not run from the repository root. |
 | Folder `gym_env` already exists and has `bin/` instead of `Scripts/` | It was made on Linux/macOS (or WSL). It cannot run on Windows; use another folder name. |
-| macOS (Big Sur+) with rendering on: `ImportError: Can't find framework /System/Library/Frameworks/OpenGL.framework` | Run `pip3 install pyglet==1.5.20`. |
+| macOS (Big Sur+) with rendering on: `ImportError: Can't find framework /System/Library/Frameworks/OpenGL.framework` | Run `pip install pyglet==1.5.20`. |
 | `f110-gym requires pyglet<1.5, but you have pyglet 1.5.20` | Safe to ignore; the environment should still work. |
