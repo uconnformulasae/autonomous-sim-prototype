@@ -1,0 +1,19 @@
+# Doxygen configuration for genetic_sim. Run `doxygen Doxyfile` in this folder;
+# HTML output goes to docs/html/index.html.
+PROJECT_NAME           = "FSAE Genetic Sim"
+PROJECT_BRIEF          = "Evolving a neural-network controller for the F1TENTH gym"
+OUTPUT_DIRECTORY       = docs
+INPUT                  = .
+FILE_PATTERNS          = *.py
+RECURSIVE              = YES
+EXCLUDE_PATTERNS       = */runs/* */docs/*
+OPTIMIZE_OUTPUT_JAVA   = YES
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+PYTHON_DOCSTRING       = YES
+AUTOLINK_SUPPORT       = YES
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+SOURCE_BROWSER         = YES
+HAVE_DOT               = NO

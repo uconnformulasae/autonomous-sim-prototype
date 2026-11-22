@@ -1,5 +1,6 @@
 """
-Build start_poses.csv from the racetracks' centerline files.
+@file extract_start_poses.py
+@brief Build start_poses.csv from the racetracks' centerline files.
 
 For each track folder in maps/f1tenth_racetracks, reads the first two points of
 <Name>_centerline.csv and writes one row:
@@ -28,6 +29,12 @@ OUT_PATH = os.path.join(HERE, 'start_poses.csv')
 
 
 def first_two_points(path):
+    """@brief Read the first two points of a centerline CSV.
+
+    @param path Path to a *_centerline.csv file ('#' comment lines are skipped).
+    @return list Two (x, y) tuples.
+    @throws ValueError If the file has fewer than two points.
+    """
     points = []
     with open(path) as f:
         for line in f:
@@ -41,6 +48,7 @@ def first_two_points(path):
 
 
 def main():
+    """@brief Scan every track folder and write start_poses.csv."""
     rows = []
     for track_dir in sorted(os.listdir(MAPS_DIR)):
         full_dir = os.path.join(MAPS_DIR, track_dir)

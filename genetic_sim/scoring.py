@@ -1,11 +1,12 @@
 """
-Everything about scoring cars lives here.
+@file scoring.py
+@brief Everything about scoring cars lives here.
 
-    update_score()   the scoring formula: edit it and the constants below to change
-                     what the genetic run rewards
-    ScoreKeeper      tracks each car's score, distance, speed and crash time during
-                     a race, and builds the results dicts at the end
-    combine_scores() turns a car's scores on several tracks into one ranking score
+ - update_score(): the scoring formula; edit it and the constants below to change
+   what the genetic run rewards
+ - ScoreKeeper: tracks each car's score, distance, speed and crash time during
+   a race, and builds the results dicts at the end
+ - combine_scores(): turns a car's scores on several tracks into one ranking score
 
 race() in testing_env.py makes a ScoreKeeper, calls step() after every physics step
 and results() when the race is over.
@@ -35,15 +36,16 @@ FRONT_BEAMS = slice(NUM_BEAMS // 2 - _front, NUM_BEAMS // 2 + _front + 1)
 
 
 def update_score(score, alive, crashed, scans, speed, prev_speed, step_dist, dt):
-    """Add this step's score to `score` in place. All arguments are arrays over cars.
+    """@brief Add this step's score to `score` in place. All arguments are arrays over cars.
 
-    score       running score per car (modified in place)
-    alive       cars still driving at the start of this step; only they score
-    crashed     cars that crashed during this step (a subset of alive)
-    scans       LiDAR ranges, shape (cars, NUM_BEAMS)
-    speed       speed now (m/s); prev_speed is the speed one step ago
-    step_dist   distance driven during this step (m)
-    dt          physics timestep (s)
+    @param score      Running score per car (modified in place).
+    @param alive      Cars still driving at the start of this step; only they score.
+    @param crashed    Cars that crashed during this step (a subset of alive).
+    @param scans      LiDAR ranges, shape (cars, NUM_BEAMS).
+    @param speed      Speed now (m/s).
+    @param prev_speed Speed one step ago (m/s).
+    @param step_dist  Distance driven during this step (m).
+    @param dt         Physics timestep (s).
 
     Free space straight ahead in the LiDAR tells a turn from a straight: a wall
     close ahead means a turn is coming. Too fast is faster than the car could
@@ -68,13 +70,14 @@ SCORE_FLOOR = 1e-3  # lowest per-track score that counts when multiplying across
 
 
 def combine_scores(per_track, tracks):
-    """Turn each car's per-track race scores into one score per car.
+    """@brief Turn each car's per-track race scores into one score per car.
 
-    per_track  {track: [result dict per car]} as returned by race_tracks()
-    tracks     the tracks to combine, in order
+    @param per_track {track: [result dict per car]} as returned by race_tracks().
+    @param tracks    The tracks to combine, in order.
+    @return tuple (scores, geom_mean): scores is (len(tracks), n_cars), the raw
+            score of each car on each track; geom_mean is (n_cars,), the number
+            that ranks the cars.
 
-    Returns (scores, geom_mean): scores is (len(tracks), n_cars), the raw score of
-    each car on each track; geom_mean is (n_cars,), the number that ranks the cars.
     The scores are multiplied: geom_mean is the geometric mean, (s1 * s2 * ...)^(1/k),
     so a car has to do well on every track, and a bad track drags it down far more
     than it would in a plain average. Taking the k-th root keeps it on the same scale
@@ -89,7 +92,7 @@ def combine_scores(per_track, tracks):
 
 
 class ScoreKeeper:
-    """Tracks every car's score and race statistics, and builds the final results.
+    """@brief Tracks every car's score and race statistics, and builds the final results.
 
     race() makes one per race, calls step() after every env.step(), and
     results() at the end. The arrays (alive, score, distance) are updated in
@@ -97,6 +100,12 @@ class ScoreKeeper:
     """
 
     def __init__(self, n, obs, dt):
+        """@brief Set up tracking for a new race.
+
+        @param n   Number of cars.
+        @param obs Observation from env.reset() (start positions and speeds).
+        @param dt  Physics timestep (s).
+        """
         self.dt = dt
         self.alive = np.ones(n, dtype=bool)
         self.death_time = np.full(n, np.nan)
@@ -107,7 +116,11 @@ class ScoreKeeper:
         self._speed = np.abs(np.asarray(obs['linear_vels_x'], dtype=np.float64))
 
     def step(self, obs, sim_time):
-        """Update scores and stats from the observation after one env step."""
+        """@brief Update scores and stats from the observation after one env step.
+
+        @param obs      Observation returned by env.step().
+        @param sim_time Simulated time so far (s); recorded as the crash time.
+        """
         new_xy = np.column_stack([obs['poses_x'], obs['poses_y']])
         step_dist = np.linalg.norm(new_xy - self._xy, axis=1)
         self.distance[self.alive] += step_dist[self.alive]
@@ -125,7 +138,13 @@ class ScoreKeeper:
                 self.death_time[i] = sim_time
 
     def results(self, obs, sim_time):
-        """One result dict per car, once the race is over."""
+        """@brief Build the results once the race is over.
+
+        @param obs      Final observation (for lap counts).
+        @param sim_time Total simulated time (s).
+        @return list One dict per car: score, crashed, death_time_s, sim_time_s,
+                distance_m, median_speed_mps, laps.
+        """
         results = []
         for i in range(len(self.score)):
             crashed = not np.isnan(self.death_time[i])

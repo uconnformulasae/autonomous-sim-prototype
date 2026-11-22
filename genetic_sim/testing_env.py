@@ -1,5 +1,6 @@
 """
-Race a population of randomly initialised neural nets on one track.
+@file testing_env.py
+@brief Race a population of randomly initialised neural nets on one track.
 
 Creates n NNControllers (each with its own random weights), saves every net's
 weights and biases, then races all n cars at once on the same track from the
@@ -56,12 +57,20 @@ DEAD_COLOUR = (110, 110, 110)
 
 
 def is_window_closed(ex):
+    """@brief Whether an exception means the render window was closed.
+
+    @param ex The exception caught from env.render().
+    @return bool True if the user closed the window.
+    """
     # EnvRenderer.on_close raises a plain Exception with this message.
     return 'window was closed' in str(ex)
 
 
 def add_race_view(env):
-    """Render callback: follow the leader, colour cars by state, show race status."""
+    """@brief Register a render callback: follow the leader, colour cars by state, show status.
+
+    @param env The gym env; race() must set env.unwrapped.view (alive, distance, time, score).
+    """
     def render_callback(e):
         v = env.unwrapped.view
         alive, distance = v['alive'], v['distance']
@@ -84,12 +93,22 @@ def add_race_view(env):
 
 
 def make_population(n, base_seed):
-    """n controllers, each seeded base_seed + i so a run can be reproduced."""
+    """@brief Make n controllers, each seeded base_seed + i so a run can be reproduced.
+
+    @param n         Population size.
+    @param base_seed Seed of car 0.
+    @return tuple (controllers, seeds).
+    """
     seeds = [base_seed + i for i in range(n)]
     return [NNController(seed=s) for s in seeds], seeds
 
 
 def load_population(path):
+    """@brief Load a population from a weights.npz file.
+
+    @param path Path to the .npz written by save_weights().
+    @return tuple (controllers, seeds).
+    """
     data = np.load(path)
     controllers = []
     for params in data['params']:
@@ -100,6 +119,12 @@ def load_population(path):
 
 
 def save_weights(path, controllers, seeds):
+    """@brief Save a population as weights.npz (params, layer_sizes, seeds).
+
+    @param path        Output .npz path.
+    @param controllers The population.
+    @param seeds       Weight-init seed of each car.
+    """
     first = controllers[0].net
     layer_sizes = [first.weights[0].shape[0]] + [W.shape[1] for W in first.weights]
     np.savez(path,
@@ -109,7 +134,12 @@ def save_weights(path, controllers, seeds):
 
 
 def make_ghost_env(map_path, n):
-    """n-car env where the cars cannot collide with or see each other."""
+    """@brief Make an n-car env where the cars cannot collide with or see each other.
+
+    @param map_path Map path without extension.
+    @param n        Number of cars.
+    @return The gym env.
+    """
     # RaceCar keeps one LiDAR simulator (and so one map) for the whole process,
     # and every new env loads its map into it. Clearing it first gives this env
     # a simulator of its own, which race() swaps back in, so envs for different
@@ -134,10 +164,15 @@ def make_ghost_env(map_path, n):
 
 
 def race(env, controllers, start_pose, max_steps, render):
-    """Drive all cars at once until every car has crashed or time runs out.
+    """@brief Drive all cars at once until every car has crashed or time runs out.
 
-    Returns (results, window_open). window_open is False if the render window
-    was closed, which also ends the race early.
+    @param env         Env from make_ghost_env().
+    @param controllers One NNController per car.
+    @param start_pose  (x, y, theta) shared by all cars.
+    @param max_steps   Step limit.
+    @param render      Whether to render.
+    @return tuple (results, window_open). window_open is False if the render
+            window was closed, which also ends the race early.
     """
     n = len(controllers)
     RaceCar.scan_simulator = env.unwrapped.scan_simulator  # this env's map; see make_ghost_env
@@ -178,7 +213,14 @@ def race(env, controllers, start_pose, max_steps, render):
 
 
 def show_best(params, hidden, track, all_tracks, max_steps):
-    """Render one car on one track; the window stays up until closed."""
+    """@brief Render one car on one track; the window stays up until closed.
+
+    @param params     Flat weight vector of the car.
+    @param hidden     Hidden layer sizes.
+    @param track      Track name.
+    @param all_tracks Result of load_tracks().
+    @param max_steps  Step limit.
+    """
     print(f'\nShowing the final best car on {track}. Close the window to exit.')
     c = NNController(hidden=hidden)
     c.net.set_params(params)
@@ -198,7 +240,12 @@ def show_best(params, hidden, track, all_tracks, max_steps):
 
 
 def write_population(path, params, hidden):
-    """Save flat parameter vectors (one row per car) in the weights.npz format."""
+    """@brief Save flat parameter vectors (one row per car) in the weights.npz format.
+
+    @param path   Output .npz path.
+    @param params Array (cars, P) of flat weight vectors.
+    @param hidden Hidden layer sizes.
+    """
     controllers = []
     for p in params:
         c = NNController(hidden=hidden)
@@ -208,7 +255,11 @@ def write_population(path, params, hidden):
 
 
 def best_from_saved(path):
-    """Params of the best car in a saved weights.npz (by results.csv next to it, if any)."""
+    """@brief Find the best car in a saved weights.npz (by results.csv next to it, if any).
+
+    @param path Path to weights.npz or best.npz.
+    @return tuple (flat params of the best car, hidden layer sizes).
+    """
     controllers, _ = load_population(path)
     hidden = tuple(np.load(path)['layer_sizes'][1:-1])
     best = 0
@@ -227,12 +278,17 @@ _envs_group = None
 
 
 def _quiet_worker():
+    """@brief Pool initializer: silence the repeated RK4 integrator warning."""
     # Every env build warns that RK4 is the integrator; once is plenty.
     warnings.filterwarnings('ignore', message='Chosen integrator is RK4')
 
 
 def _race_track(job):
-    """Race a chunk of the population on one track. Runs in a worker process."""
+    """@brief Race a chunk of the population on one track. Runs in a worker process.
+
+    @param job Tuple (group, track, lo, map_path, start_pose, params, hidden, max_steps).
+    @return tuple (track, lo, results).
+    """
     global _envs_group
     group, track, lo, map_path, start_pose, params, hidden, max_steps = job
     if group != _envs_group:
@@ -253,24 +309,38 @@ def _race_track(job):
 
 
 def choose_workers(requested, n_races):
-    """Worker count: `requested`, or 75% of the CPU threads when 0 (at least 1).
+    """@brief Pick the worker count: `requested`, or 75% of the CPU threads when 0 (at least 1).
 
     More workers than car-races would only sit idle.
+
+    @param requested Requested workers (0 for the default).
+    @param n_races   Number of car-races available to share.
+    @return int Worker count.
     """
     default = max(1, (os.cpu_count() or 1) * 3 // 4)
     return min(requested or default, n_races)
 
 
 def make_pool(workers):
+    """@brief Create the worker process pool.
+
+    @param workers Number of processes.
+    @return multiprocessing.Pool
+    """
     return Pool(workers, initializer=_quiet_worker)
 
 
 def split_jobs(n_cars, n_tracks, workers):
-    """Slices (lo, hi) of the population that each track is split into.
+    """@brief Slices (lo, hi) of the population that each track is split into.
 
     The work is n_cars * n_tracks car-races, shared as evenly as possible over
     the workers: each job races cars_per_job cars on one track (a job cannot
     span tracks, since it runs in one env).
+
+    @param n_cars   Population size.
+    @param n_tracks Tracks raced at once.
+    @param workers  Worker processes.
+    @return list of (lo, hi) pairs.
     """
     cars_per_job = -(-n_cars * n_tracks // workers)  # ceil
     bounds = np.linspace(0, n_cars, -(-n_cars // cars_per_job) + 1).astype(int)
@@ -278,10 +348,20 @@ def split_jobs(n_cars, n_tracks, workers):
 
 
 def race_tracks(pool, group, tracks, all_tracks, params, hidden, max_steps, workers):
-    """Race every car on every track; returns {track: [result per car]}.
+    """@brief Race every car on every track.
 
     The cars are ghosts to each other, so splitting them across processes does
     not change any car's result, only how many cores share the work.
+
+    @param pool       Worker pool from make_pool().
+    @param group      Cache key; worker env caches reset when it changes.
+    @param tracks     Track names to race.
+    @param all_tracks Result of load_tracks().
+    @param params     Array (cars, P) of flat weight vectors.
+    @param hidden     Hidden layer sizes.
+    @param max_steps  Step limit per race.
+    @param workers    Worker processes.
+    @return dict {track: [result dict per car]}.
     """
     jobs = [(group, t, lo, *all_tracks[t], params[lo:hi], hidden, max_steps)
             for t in tracks for lo, hi in split_jobs(len(params), len(tracks), workers)]
@@ -292,6 +372,7 @@ def race_tracks(pool, group, tracks, all_tracks, params, hidden, max_steps, work
 
 
 def main():
+    """@brief Command-line entry point: race n nets on one track and save the results."""
     ###################
     # CONFIGURE
     map = MAP

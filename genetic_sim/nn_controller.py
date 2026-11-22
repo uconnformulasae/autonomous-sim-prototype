@@ -1,5 +1,6 @@
 """
-Neural-network controller for the F1TENTH gym (draft).
+@file nn_controller.py
+@brief Neural-network controller for the F1TENTH gym (draft).
 
 A small fully connected network, written in plain NumPy, maps the car's
 observation straight to an action. The weights are randomly initialised, so
@@ -37,7 +38,10 @@ START_POSES_CSV = os.path.join(HERE, 'maps', 'start_poses', 'start_poses.csv')
 
 
 def load_tracks():
-    """Return {track: (map path without extension, (x, y, theta))}."""
+    """@brief Read start_poses.csv.
+
+    @return dict {track: (map path without extension, (x, y, theta))}.
+    """
     tracks = {}
     with open(START_POSES_CSV, newline='') as f:
         for row in csv.DictReader(f):
@@ -54,9 +58,14 @@ LIDAR_BINS = 54  # 1080 / 54 = 20 beams per bin
 
 
 class MLP:
-    """Fully connected net with tanh hidden layers and a linear output layer."""
+    """@brief Fully connected net with tanh hidden layers and a linear output layer."""
 
     def __init__(self, layer_sizes, rng):
+        """@brief Create a net with Xavier/Glorot-uniform weights and zero biases.
+
+        @param layer_sizes Sizes of every layer, input first, output last.
+        @param rng         numpy Generator used for the initial weights.
+        """
         self.weights = []
         self.biases = []
         for n_in, n_out in zip(layer_sizes[:-1], layer_sizes[1:]):
@@ -66,15 +75,28 @@ class MLP:
             self.biases.append(np.zeros(n_out))
 
     def forward(self, x):
+        """@brief Run the net.
+
+        @param x Input vector.
+        @return ndarray Raw (linear) output vector.
+        """
         for W, b in zip(self.weights[:-1], self.biases[:-1]):
             x = np.tanh(x @ W + b)
         return x @ self.weights[-1] + self.biases[-1]
 
     # Flat parameter vector access, so an optimiser (e.g. CMA-ES) can tune the net.
     def get_params(self):
+        """@brief All weights and biases as one flat vector.
+
+        @return ndarray Flat parameter vector.
+        """
         return np.concatenate([p.ravel() for p in self.weights + self.biases])
 
     def set_params(self, flat):
+        """@brief Load weights and biases from a flat vector (see get_params()).
+
+        @param flat Flat parameter vector of the right length.
+        """
         i = 0
         for p in self.weights + self.biases:
             p[...] = flat[i:i + p.size].reshape(p.shape)
@@ -82,9 +104,14 @@ class MLP:
 
 
 class NNController:
-    """Turns a gym observation into [steer, speed] using the MLP."""
+    """@brief Turns a gym observation into [steer, speed] using the MLP."""
 
     def __init__(self, hidden=(64, 64), seed=None):
+        """@brief Create a controller with a randomly initialised net.
+
+        @param hidden Sizes of the hidden layers.
+        @param seed   Seed for the weight init (None: random).
+        """
         rng = np.random.default_rng(seed)
         n_inputs = LIDAR_BINS + 4
         self.net = MLP([n_inputs, *hidden, 2], rng)
@@ -92,10 +119,18 @@ class NNController:
         self.prev_speed = 0.0
 
     def reset(self):
+        """@brief Clear the remembered previous steer and speed (call before a race)."""
         self.prev_steer = 0.0
         self.prev_speed = 0.0
 
     def features(self, obs, agent=0):
+        """@brief Build the network input from an observation.
+
+        @param obs   Gym observation dict.
+        @param agent Index of the car in the observation.
+        @return ndarray LIDAR_BINS scaled LiDAR minima followed by speed, yaw rate,
+                previous steer and previous speed (all normalised).
+        """
         scan = np.asarray(obs['scans'][agent], dtype=np.float64)
         # Min-pool each bin: the closest obstacle in that direction matters most.
         bins = scan.reshape(LIDAR_BINS, -1).min(axis=1)
@@ -110,6 +145,12 @@ class NNController:
         return np.concatenate([lidar, state])
 
     def plan(self, obs, agent=0):
+        """@brief Choose the action for one car.
+
+        @param obs   Gym observation dict.
+        @param agent Index of the car in the observation.
+        @return tuple (steer in rad, speed in m/s).
+        """
         raw_steer, raw_speed = self.net.forward(self.features(obs, agent))
 
         # Steering head: tanh -> [-1, 1] -> [s_min, s_max].
@@ -122,6 +163,7 @@ class NNController:
 
 
 def main():
+    """@brief Command-line entry point: drive one random net on one track."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--headless', action='store_true', help='run without rendering')
     parser.add_argument('--seed', type=int, default=None, help='seed for weight init')

@@ -1,5 +1,6 @@
 """
-Genetic training: evolve the NN controller by mutating the best car each generation.
+@file run.py
+@brief Genetic training: evolve the NN controller by mutating the best car each generation.
 
 This file is only the genetic algorithm: the track schedule, mutation, the
 generation loop and the run logs. Racing the cars lives in testing_env.py, the
@@ -69,15 +70,23 @@ from scoring import combine_scores
 from testing_env import (TIMESTEP, best_from_saved, choose_workers, make_pool,
                          make_population, race_tracks, show_best, split_jobs,
                          write_population)
-from config import get_config
 
 
 def fail(msg):
+    """@brief Exit with a config error message.
+
+    @param msg Description of the problem.
+    """
     raise SystemExit(f'config error: {msg}')
 
 
 def check_config(args, all_tracks):
-    """Validate the settings; returns the training tracks, in order."""
+    """@brief Validate the settings.
+
+    @param args       Settings (attribute access).
+    @param all_tracks Result of load_tracks().
+    @return list Training tracks, in order.
+    """
     if args.n < 2:
         fail('n must be at least 2')
     test_tracks = args.test_tracks
@@ -94,7 +103,12 @@ def check_config(args, all_tracks):
 
 
 def initial_population(args, rng):
-    """Generation 0: random nets, or mutants of the best car in a saved run."""
+    """@brief Generation 0: random nets, or mutants of the best car in a saved run.
+
+    @param args Settings.
+    @param rng  numpy Generator for the mutation noise.
+    @return tuple (population array (n, P), hidden layer sizes).
+    """
     if args.load:
         best_params, hidden = best_from_saved(args.load)
         population = mutate(best_params, args.n, args.sigma, args.mutation_rate, rng)
@@ -106,7 +120,15 @@ def initial_population(args, rng):
 
 
 def mutate(parent, n, sigma, rate, rng):
-    """n-1 mutants of parent, with the unchanged parent first."""
+    """@brief Make n cars from a parent: the unchanged parent plus n-1 mutants.
+
+    @param parent Flat weight vector.
+    @param n      Population size.
+    @param sigma  Std of the Gaussian noise.
+    @param rate   Fraction of weights that get noise.
+    @param rng    numpy Generator.
+    @return ndarray (n, P), parent in row 0.
+    """
     children = np.repeat(parent[None, :], n, axis=0)
     noise = rng.normal(0.0, sigma, size=(n - 1, parent.size))
     if rate < 1.0:
@@ -116,12 +138,26 @@ def mutate(parent, n, sigma, rate, rng):
 
 
 def track_group(track_names, g, size):
-    """The g-th group of `size` consecutive tracks, wrapping round the list."""
+    """@brief The g-th group of `size` consecutive tracks, wrapping round the list.
+
+    @param track_names Training tracks in order.
+    @param g           Group index.
+    @param size        Tracks per group.
+    @return list Track names.
+    """
     return [track_names[(g * size + k) % len(track_names)] for k in range(size)]
 
 
 def init_run(args, track_names, n_groups, total_gens, hidden):
-    """Create the run directory and the files that are appended to; returns its path."""
+    """@brief Create the run directory and the files that are appended to.
+
+    @param args        Settings.
+    @param track_names Training tracks in order.
+    @param n_groups    Number of track groups.
+    @param total_gens  Total generations.
+    @param hidden      Hidden layer sizes.
+    @return str Path of the run directory.
+    """
     k = args.tracks_per_group
     run_dir = os.path.join(HERE, 'runs', f'genetic_{time.strftime("%Y%m%d_%H%M%S")}')
     os.makedirs(run_dir)
@@ -143,7 +179,18 @@ def init_run(args, track_names, n_groups, total_gens, hidden):
 
 
 def log_generation(run_dir, gen, group, tracks, per_track, scores, geom_mean, best, wall):
-    """Print the generation's summary line and append it to history.csv and generations.csv."""
+    """@brief Print the generation's summary line and append it to history.csv and generations.csv.
+
+    @param run_dir   Run directory.
+    @param gen       Generation number.
+    @param group     Track group number.
+    @param tracks    Tracks raced this generation.
+    @param per_track Results from race_tracks().
+    @param scores    Per-track scores (tracks, cars).
+    @param geom_mean Ranking score per car.
+    @param best      Index of the best car.
+    @param wall      Wall-clock seconds the generation took.
+    """
     best_runs = [per_track[t][best] for t in tracks]
     print(f'gen {gen:4d}  [{", ".join(tracks)}]  best car {best:3d}  geom_mean {geom_mean[best]:8.1f}  '
           f'(mean {geom_mean.mean():7.1f})  per track: '
@@ -167,7 +214,14 @@ def log_generation(run_dir, gen, group, tracks, per_track, scores, geom_mean, be
 
 
 def save_generation(run_dir, population, best_params, best_history, hidden):
-    """Write the latest population, best car and best-per-generation history."""
+    """@brief Write the latest population, best car and best-per-generation history.
+
+    @param run_dir      Run directory.
+    @param population   Array (n, P) of flat weight vectors.
+    @param best_params  Flat weights of the best car.
+    @param best_history Best car of every generation so far.
+    @param hidden       Hidden layer sizes.
+    """
     net = NNController(hidden=hidden).net
     layer_sizes = np.array([net.weights[0].shape[0]] + [W.shape[1] for W in net.weights])
     write_population(os.path.join(run_dir, 'population.npz'), population, hidden)
@@ -177,7 +231,19 @@ def save_generation(run_dir, population, best_params, best_history, hidden):
 
 
 def run_test(pool, cache_key, cycle, gen, params, hidden, test_tracks, all_tracks, max_steps, run_dir):
-    """Race the best car on every test track. Results are logged only; no weights change."""
+    """@brief Race the best car on every test track. Results are logged only; no weights change.
+
+    @param pool         Worker pool.
+    @param cache_key    Env cache key for the workers.
+    @param cycle        Cycle index (0-based).
+    @param gen          Generation the best car came from.
+    @param params       Flat weights of the best car.
+    @param hidden       Hidden layer sizes.
+    @param test_tracks  Held-out tracks.
+    @param all_tracks   Result of load_tracks().
+    @param max_steps    Step limit per race.
+    @param run_dir      Run directory.
+    """
     write_population(os.path.join(run_dir, f'best_cycle{cycle + 1}.npz'), params[None, :], hidden)
     if not test_tracks:
         return
@@ -195,7 +261,8 @@ def run_test(pool, cache_key, cycle, gen, params, hidden, test_tracks, all_track
 
 
 def main():
-    args = get_config()
+    """@brief Run the genetic training described in the module header."""
+    args = SimpleNamespace(**get_config())
     all_tracks = load_tracks()
     test_tracks = args.test_tracks
     track_names = check_config(args, all_tracks)
