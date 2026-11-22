@@ -160,7 +160,42 @@ def make_ghost_env(map_path, n):
     # LiDAR: skip ray-casting the other cars into each car's scan.
     for agent in sim.agents:
         agent.ray_cast_agents = lambda scan: scan
+        _freeze_on_crash(agent)
     return env
+
+
+def _freeze_on_crash(agent):
+    """@brief Stop simulating a car once it crashes.
+
+    A crashed car sits still and nothing reads its scan (the scorer only looks
+    at living cars), so re-running its physics and 1080-beam LiDAR every step
+    is wasted work. After the first crash its last scan is replayed instead.
+
+    @param agent The RaceCar to patch.
+    """
+    update_pose, update_scan, reset = agent.update_pose, agent.update_scan, agent.reset
+    frozen = {'scan': None}
+
+    def patched_update_pose(steer, vel):
+        if frozen['scan'] is not None:
+            return frozen['scan']
+        return update_pose(steer, vel)
+
+    def patched_update_scan(agent_scans, idx):
+        if frozen['scan'] is not None:
+            agent_scans[idx] = frozen['scan']
+            return
+        update_scan(agent_scans, idx)
+        if agent.in_collision:
+            frozen['scan'] = agent_scans[idx]
+
+    def patched_reset(pose):
+        frozen['scan'] = None
+        reset(pose)
+
+    agent.update_pose = patched_update_pose
+    agent.update_scan = patched_update_scan
+    agent.reset = patched_reset
 
 
 def race(env, controllers, start_pose, max_steps, render):
