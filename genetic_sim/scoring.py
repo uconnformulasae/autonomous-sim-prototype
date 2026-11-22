@@ -72,7 +72,7 @@ SCORE_FLOOR = 1e-3  # lowest per-track score that counts when multiplying across
 def combine_scores(per_track, tracks):
     """@brief Turn each car's per-track race scores into one score per car.
 
-    @param per_track {track: [result dict per car]} as returned by race_tracks().
+    @param per_track {track: [result dict per car]} as returned by Racer.race().
     @param tracks    The tracks to combine, in order.
     @return tuple (scores, geom_mean): scores is (len(tracks), n_cars), the raw
             score of each car on each track; geom_mean is (n_cars,), the number

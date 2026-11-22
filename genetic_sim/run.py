@@ -2,12 +2,13 @@
 @file run.py
 @brief Genetic training: evolve the NN controller by mutating the best car each generation.
 
-This file is only the genetic algorithm: the track schedule, mutation, the
-generation loop and the run logs. Racing the cars lives in testing_env.py, the
-score in scoring.py and the settings in config.py.
+This file is the genetic algorithm and the run logs: the track schedule, mutation,
+the generation loop, and the grid search that repeats it for several configs.
+Racing the cars in parallel lives in parallel.py, the race itself in
+testing_env.py, the score in scoring.py and the settings in config.py.
 
 Each generation races a population of n cars on a group of tracks at once (the
-races are split over worker processes, see testing_env.race_tracks). A car's
+races are split over worker processes, see parallel.py). A car's
 score for the generation is the geometric mean of its scores across the tracks in
 the group (scoring.combine_scores). The best car then seeds the next generation:
 
@@ -48,10 +49,17 @@ stopped with Ctrl+C keeps everything up to the last finished generation):
 
 All settings live in config.py (each key is commented there):
 
-    python run.py
+    python run.py            train once with get_config()
+    python run.py --grid     grid search: train once per combination in get_grid(),
+                             score each final best car on val_tracks (never trained
+                             on), and save the best combination to
+                             runs/gridsearch_<timestamp>/ (grid_search.log,
+                             best_config.json, best.npz)
 """
 
+import argparse
 import csv
+import itertools
 import json
 import os
 import time
@@ -64,11 +72,11 @@ for _var in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS'):
 
 import numpy as np
 
-from config import get_config
+from config import get_config, get_grid
 from nn_controller import HERE, NNController, load_tracks
+from parallel import Racer
 from scoring import combine_scores
-from testing_env import (TIMESTEP, best_from_saved, choose_workers, make_pool,
-                         make_population, race_tracks, show_best, split_jobs,
+from testing_env import (TIMESTEP, best_from_saved, make_population, show_best,
                          write_population)
 
 
@@ -90,15 +98,19 @@ def check_config(args, all_tracks):
     if args.n < 2:
         fail('n must be at least 2')
     test_tracks = args.test_tracks
-    track_names = args.tracks or [t for t in all_tracks if t not in test_tracks]
-    unknown = [t for t in track_names + test_tracks if t not in all_tracks]
+    val_tracks = getattr(args, 'val_tracks', None) or []
+    held_out = test_tracks + val_tracks
+    track_names = args.tracks or [t for t in all_tracks if t not in held_out]
+    unknown = [t for t in track_names + held_out if t not in all_tracks]
     if unknown:
         fail(f'unknown track(s) {unknown}; choose from: {", ".join(all_tracks)}')
     if args.show_track not in (None, 'none') and args.show_track not in all_tracks:
         fail(f'unknown show_track {args.show_track!r}')
-    overlap = set(track_names) & set(test_tracks)
+    overlap = set(track_names) & set(held_out)
     if overlap:
-        fail(f'track(s) {sorted(overlap)} are both training and test tracks')
+        fail(f'track(s) {sorted(overlap)} are both training and test/validation tracks')
+    if set(test_tracks) & set(val_tracks):
+        fail(f'track(s) {sorted(set(test_tracks) & set(val_tracks))} are both test and validation tracks')
     return track_names
 
 
@@ -148,6 +160,67 @@ def track_group(track_names, g, size):
     return [track_names[(g * size + k) % len(track_names)] for k in range(size)]
 
 
+def training_order(args, track_names, rng):
+    """@brief The training tracks in the order they are raced (shuffled once if configured).
+
+    @param args        Settings.
+    @param track_names Training tracks.
+    @param rng         numpy Generator (only used when shuffling).
+    @return list Track names.
+    """
+    if args.shuffle_tracks:
+        return [str(t) for t in rng.permutation(track_names)]
+    return track_names
+
+
+def schedule(args, n_tracks):
+    """@brief Size of the training schedule.
+
+    @param args     Settings.
+    @param n_tracks Number of training tracks.
+    @return tuple (groups, generations per cycle, total generations).
+    """
+    n_groups = -(-n_tracks // args.tracks_per_group)  # ceil; a short last group wraps round to the start
+    gens_per_cycle = n_groups * args.gens_per_group
+    return n_groups, gens_per_cycle, args.cycles * gens_per_cycle
+
+
+def evolve(racer, args, track_names, all_tracks, population, hidden, rng, key=0):
+    """@brief The genetic loop: race, pick the best car, mutate it, repeat.
+
+    Yields once per generation, after the race and before the next population
+    is made, so the caller can log or save.
+
+    @param racer       parallel.Racer that does the racing.
+    @param args        Settings.
+    @param track_names Training tracks in the order to race them.
+    @param all_tracks  Result of load_tracks().
+    @param population  Generation 0, array (n, P).
+    @param hidden      Hidden layer sizes.
+    @param rng         numpy Generator for the mutation noise.
+    @param key         Distinguishes this run's worker env caches from other runs'.
+    @yield SimpleNamespace with gen, group, cycle, tracks, per_track, scores,
+           geom_mean, best (index), best_params, population (the one just raced)
+           and wall (seconds).
+    """
+    k = args.tracks_per_group
+    n_groups, gens_per_cycle, total_gens = schedule(args, len(track_names))
+    max_steps = int(args.max_time / TIMESTEP)
+    for gen in range(total_gens):
+        group = gen // args.gens_per_group  # counts up across cycles, so env caches reset per group
+        tracks = track_group(track_names, group % n_groups, k)
+        start = time.time()
+        per_track = racer.race((key, group), tracks, all_tracks, population, hidden, max_steps)
+        scores, geom_mean = combine_scores(per_track, tracks)
+        best = int(np.argmax(geom_mean))
+        best_params = population[best].copy()
+        yield SimpleNamespace(gen=gen, group=group, cycle=gen // gens_per_cycle, tracks=tracks,
+                              per_track=per_track, scores=scores, geom_mean=geom_mean,
+                              best=best, best_params=best_params, population=population,
+                              wall=time.time() - start)
+        population = mutate(best_params, args.n, args.sigma, args.mutation_rate, rng)
+
+
 def init_run(args, track_names, n_groups, total_gens, hidden):
     """@brief Create the run directory and the files that are appended to.
 
@@ -185,7 +258,7 @@ def log_generation(run_dir, gen, group, tracks, per_track, scores, geom_mean, be
     @param gen       Generation number.
     @param group     Track group number.
     @param tracks    Tracks raced this generation.
-    @param per_track Results from race_tracks().
+    @param per_track Results from Racer.race().
     @param scores    Per-track scores (tracks, cars).
     @param geom_mean Ranking score per car.
     @param best      Index of the best car.
@@ -230,10 +303,10 @@ def save_generation(run_dir, population, best_params, best_history, hidden):
              layer_sizes=layer_sizes)
 
 
-def run_test(pool, cache_key, cycle, gen, params, hidden, test_tracks, all_tracks, max_steps, run_dir):
+def run_test(racer, cache_key, cycle, gen, params, hidden, test_tracks, all_tracks, max_steps, run_dir):
     """@brief Race the best car on every test track. Results are logged only; no weights change.
 
-    @param pool         Worker pool.
+    @param racer        parallel.Racer.
     @param cache_key    Env cache key for the workers.
     @param cycle        Cycle index (0-based).
     @param gen          Generation the best car came from.
@@ -247,8 +320,7 @@ def run_test(pool, cache_key, cycle, gen, params, hidden, test_tracks, all_track
     write_population(os.path.join(run_dir, f'best_cycle{cycle + 1}.npz'), params[None, :], hidden)
     if not test_tracks:
         return
-    per_track = race_tracks(pool, cache_key, test_tracks, all_tracks, params[None, :], hidden,
-                            max_steps, workers=len(test_tracks))
+    per_track = racer.race(cache_key, test_tracks, all_tracks, params[None, :], hidden, max_steps)
     print(f'----- TEST after cycle {cycle + 1} (best car of gen {gen}, weights not updated)')
     with open(os.path.join(run_dir, 'test.csv'), 'a', newline='') as f:
         w = csv.writer(f)
@@ -260,79 +332,163 @@ def run_test(pool, cache_key, cycle, gen, params, hidden, test_tracks, all_track
                         r['distance_m'], r['median_speed_mps'], r['laps']])
 
 
-def main():
-    """@brief Run the genetic training described in the module header."""
-    args = SimpleNamespace(**get_config())
-    all_tracks = load_tracks()
-    test_tracks = args.test_tracks
-    track_names = check_config(args, all_tracks)
+def train(racer, args, track_names, all_tracks, key=0, log=False):
+    """@brief One full genetic training run: build generation 0, evolve it, return the best car.
+
+    @param racer       parallel.Racer.
+    @param args        Settings (attribute access).
+    @param track_names Training tracks (from check_config()).
+    @param all_tracks  Result of load_tracks().
+    @param key         Keeps this run's worker env caches apart from other runs'.
+    @param log         True to print progress, write the run directory and race the
+                       test tracks after every cycle. False is a quiet run that
+                       writes nothing (used by the grid search).
+    @return SimpleNamespace with best_params (flat weights), hidden, gens (generations
+            run) and run_dir (None unless log).
+    """
     rng = np.random.default_rng(args.seed)
-    if args.shuffle_tracks:
-        track_names = [str(t) for t in rng.permutation(track_names)]
-
+    track_names = training_order(args, track_names, rng)
     k = args.tracks_per_group
-    n_groups = -(-len(track_names) // k)  # ceil; a short last group wraps round to the start
-    if len(track_names) % k:
-        print(f'Note: {len(track_names)} training tracks do not split evenly into groups of {k}; '
-              f'the last group wraps round to the first tracks.')
-    gens_per_cycle = n_groups * args.gens_per_group
-    total_gens = args.cycles * gens_per_cycle
+    n_groups, gens_per_cycle, total_gens = schedule(args, len(track_names))
     max_steps = int(args.max_time / TIMESTEP)
-
     population, hidden = initial_population(args, rng)
-    run_dir = init_run(args, track_names, n_groups, total_gens, hidden)
+
+    run_dir = None
     best_history = []
-    print(f'Run: {run_dir}\n{args.n} cars, {len(track_names)} training tracks in {n_groups} groups of {k}, '
-          f'{args.gens_per_group} gens per group, {args.cycles} cycles = {total_gens} generations\n'
-          f'Test tracks: {", ".join(test_tracks) or "none"}\n'
-          f'sigma={args.sigma}, mutation rate={args.mutation_rate}\n')
+    if log:
+        run_dir = init_run(args, track_names, n_groups, total_gens, hidden)
+        if len(track_names) % k:
+            print(f'Note: {len(track_names)} training tracks do not split evenly into groups of {k}; '
+                  f'the last group wraps round to the first tracks.')
+        print(f'Run: {run_dir}\n{args.n} cars, {len(track_names)} training tracks in {n_groups} groups of {k}, '
+              f'{args.gens_per_group} gens per group, {args.cycles} cycles = {total_gens} generations\n'
+              f'Test tracks: {", ".join(args.test_tracks) or "none"}\n'
+              f'sigma={args.sigma}, mutation rate={args.mutation_rate}\n\n'
+              f'{racer.describe(args.n, k)}\n')
 
-    workers = choose_workers(args.workers, args.n * k)
-    slices = split_jobs(args.n, k, workers)
-    print(f'{workers} worker processes: {args.n} cars x {k} tracks = {args.n * k} car-races per generation, '
-          f'as {len(slices) * k} jobs of up to {max(hi - lo for lo, hi in slices)} cars\n')
-    pool = make_pool(workers)
-    gen = 0
+    for g in evolve(racer, args, track_names, all_tracks, population, hidden, rng, key):
+        if log:
+            if g.gen % gens_per_cycle == 0:
+                print(f'===== cycle {g.cycle + 1}/{args.cycles}')
+            best_history.append(g.best_params)
+            log_generation(run_dir, g.gen, g.group, g.tracks, g.per_track, g.scores, g.geom_mean,
+                           g.best, g.wall)
+            save_generation(run_dir, g.population, g.best_params, best_history, hidden)
+            if (g.gen + 1) % gens_per_cycle == 0:
+                run_test(racer, ('test', g.cycle), g.cycle, g.gen, g.best_params, hidden,
+                         args.test_tracks, all_tracks, max_steps, run_dir)
+            elif (g.gen + 1) % args.gens_per_group == 0:
+                print(f'--- group {g.group % n_groups} done; next: '
+                      f'{", ".join(track_group(track_names, (g.group + 1) % n_groups, k))}')
+    return SimpleNamespace(best_params=g.best_params, hidden=hidden, gens=g.gen + 1, run_dir=run_dir)
+
+
+def grid_combos(grid, base):
+    """@brief Every combination of the grid values.
+
+    @param grid dict {setting: list of values} from get_grid().
+    @param base dict of the default settings from get_config().
+    @return list of dicts {setting: value}, one per combination.
+    """
+    bad = [k for k, v in grid.items() if k not in base or not v]
+    if bad:
+        fail(f'grid setting(s) {bad} are not in get_config() or have no values')
+    return [dict(zip(grid, values)) for values in itertools.product(*grid.values())]
+
+
+def validate(racer, base, params, hidden, all_tracks, key):
+    """@brief Score a car on the validation tracks, always with the base config's max_time.
+
+    @param racer      parallel.Racer.
+    @param base       Default settings from get_config().
+    @param params     Flat weights of the car.
+    @param hidden     Hidden layer sizes.
+    @param all_tracks Result of load_tracks().
+    @param key        Env cache key.
+    @return tuple (geometric-mean score, per-track result dicts).
+    """
+    val = base['val_tracks']
+    per_track = racer.race(key, val, all_tracks, params[None, :], hidden,
+                           int(base['max_time'] / TIMESTEP))
+    _, geom_mean = combine_scores(per_track, val)
+    return float(geom_mean[0]), [per_track[t][0] for t in val]
+
+
+def grid_search(racer, base, grid, track_names, all_tracks):
+    """@brief Train once per combination of settings and keep the one that validates best.
+
+    Writes grid_search.log (a line per combination, then the ideal settings),
+    best_config.json and best.npz to runs/gridsearch_<timestamp>/.
+
+    @param racer       parallel.Racer.
+    @param base        Default settings from get_config().
+    @param grid        {setting: list of values} from get_grid().
+    @param track_names Training tracks.
+    @param all_tracks  Result of load_tracks().
+    """
+    combos = grid_combos(grid, base)
+    run_dir = os.path.join(HERE, 'runs', f'gridsearch_{time.strftime("%Y%m%d_%H%M%S")}')
+    os.makedirs(run_dir)
+
+    def log(msg):
+        print(msg)
+        with open(os.path.join(run_dir, 'grid_search.log'), 'a') as f:
+            f.write(msg + '\n')
+
+    log(f'{len(combos)} combinations of {grid}\n'
+        f'train: {", ".join(track_names)}\nvalidate: {", ".join(base["val_tracks"])}\n')
+    best_score = None
+    for i, combo in enumerate(combos):
+        start = time.time()
+        trained = train(racer, SimpleNamespace(**{**base, **combo}), track_names, all_tracks, key=i)
+        score, results = validate(racer, base, trained.best_params, trained.hidden, all_tracks, ('val', i))
+        per_track = '  '.join(f'{t}:{r["score"]:.1f}{"x" if r["crashed"] else ""}'
+                              for t, r in zip(base['val_tracks'], results))
+        log(f'[{i + 1}/{len(combos)}] {combo}  val {score:.1f}  {per_track}  ({time.time() - start:.0f}s)')
+        if best_score is None or score > best_score:
+            best_score, best_combo = score, combo
+            with open(os.path.join(run_dir, 'best_config.json'), 'w') as f:
+                json.dump({**base, **combo, 'val_score': score}, f, indent=2)
+            write_population(os.path.join(run_dir, 'best.npz'), trained.best_params[None, :], trained.hidden)
+    log(f'\nIDEAL SETTINGS (val {best_score:.1f}): '
+        + ', '.join(f'{k}={best_combo[k]!r}' for k in grid) + f'\nSaved to {run_dir}')
+
+
+def main():
+    """@brief Train with the config, or with --grid search the config grid."""
+    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser.add_argument('--grid', action='store_true',
+                        help='try every combination in config.get_grid() and keep the one that validates best')
+    use_grid = parser.parse_args().grid
+
+    base = get_config()
+    args = SimpleNamespace(**base)
+    all_tracks = load_tracks()
+    track_names = check_config(args, all_tracks)
+    if use_grid:
+        if not base['val_tracks']:
+            fail('val_tracks is empty; the grid search needs validation tracks')
+        grid = get_grid()
+        max_races = max(c.get('n', args.n) * c.get('tracks_per_group', args.tracks_per_group)
+                        for c in grid_combos(grid, base))
+    else:
+        max_races = args.n * args.tracks_per_group
+
     try:
-        while gen < total_gens:
-            group = gen // args.gens_per_group  # counts up across cycles, so env caches reset per group
-            cycle = gen // gens_per_cycle
-            tracks = track_group(track_names, group % n_groups, k)
-            if gen % gens_per_cycle == 0:
-                print(f'===== cycle {cycle + 1}/{args.cycles}')
-            start = time.time()
-            per_track = race_tracks(pool, group, tracks, all_tracks, population, hidden, max_steps, workers)
-
-            scores, geom_mean = combine_scores(per_track, tracks)
-            best = int(np.argmax(geom_mean))
-            best_params = population[best].copy()
-            best_history.append(best_params)
-
-            log_generation(run_dir, gen, group, tracks, per_track, scores, geom_mean, best,
-                           time.time() - start)
-            save_generation(run_dir, population, best_params, best_history, hidden)
-
-            if (gen + 1) % gens_per_cycle == 0:
-                run_test(pool, ('test', cycle), cycle, gen, best_params, hidden, test_tracks,
-                         all_tracks, max_steps, run_dir)
-            elif (gen + 1) % args.gens_per_group == 0:
-                print(f'--- group {group % n_groups} done; next: '
-                      f'{", ".join(track_group(track_names, (group + 1) % n_groups, k))}')
-            population = mutate(best_params, args.n, args.sigma, args.mutation_rate, rng)
-            gen += 1
+        with Racer(args.workers, max_races) as racer:
+            if use_grid:
+                grid_search(racer, base, grid, track_names, all_tracks)
+                return
+            result = train(racer, args, track_names, all_tracks, log=True)
     except KeyboardInterrupt:
-        print('\nStopped.')
-        pool.terminate()
-        pool.join()
-        print(f'{gen} generations saved to {run_dir}')
+        print('\nStopped. Everything up to the last finished generation is saved in the run directory.')
         return
-    pool.close()
-    pool.join()
-    print(f'{gen} generations saved to {run_dir}')
+    print(f'{result.gens} generations saved to {result.run_dir}')
 
     if args.show_track != 'none':
-        show_track = args.show_track or (test_tracks[0] if test_tracks else track_names[0])
-        show_best(best_params, hidden, show_track, all_tracks, max_steps)
+        show_track = args.show_track or (args.test_tracks[0] if args.test_tracks else track_names[0])
+        show_best(result.best_params, result.hidden, show_track, all_tracks,
+                  int(args.max_time / TIMESTEP))
 
 
 if __name__ == '__main__':

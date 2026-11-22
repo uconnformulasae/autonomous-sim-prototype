@@ -37,6 +37,20 @@ MAPS_DIR = os.path.join(HERE, 'maps', 'f1tenth_racetracks')
 START_POSES_CSV = os.path.join(HERE, 'maps', 'start_poses', 'start_poses.csv')
 
 
+def make_env(**kwargs):
+    """@brief Create the F1TENTH env, without gym's wrappers.
+
+    Importing f110_gym registers 'f110-v0', so the id is used without a
+    'f110_gym:' prefix (newer gym versions read the prefix as part of the name).
+    The env is returned unwrapped because gym's OrderEnforcing wrapper only
+    accepts reset() with no arguments, and this env's reset() takes the poses.
+
+    @param kwargs Env settings (map, map_ext, num_agents, timestep, integrator, ...).
+    @return The F110Env.
+    """
+    return gym.make('f110-v0', **kwargs).unwrapped
+
+
 def load_tracks():
     """@brief Read start_poses.csv.
 
@@ -184,7 +198,7 @@ def main():
     controller = NNController(seed=args.seed)
     print('Network parameters:', controller.net.get_params().size)
 
-    env = gym.make('f110_gym:f110-v0', map=map_path, map_ext='.png',
+    env = make_env(map=map_path, map_ext='.png',
                    num_agents=1, timestep=0.01, integrator=Integrator.RK4)
 
     if not args.headless:

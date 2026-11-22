@@ -35,14 +35,11 @@ import argparse
 import csv
 import os
 import time
-import warnings
-from multiprocessing import Pool
 
-import gym
 import numpy as np
 
 from f110_gym.envs.base_classes import Integrator, RaceCar
-from nn_controller import HERE, NNController, load_tracks
+from nn_controller import HERE, NNController, load_tracks, make_env
 from scoring import ScoreKeeper
 
 
@@ -145,10 +142,10 @@ def make_ghost_env(map_path, n):
     # a simulator of its own, which race() swaps back in, so envs for different
     # tracks can live in one process without racing on each other's maps.
     RaceCar.scan_simulator = None
-    env = gym.make('f110_gym:f110-v0', map=map_path, map_ext='.png',
+    env = make_env(map=map_path, map_ext='.png',
                    num_agents=n, timestep=TIMESTEP, integrator=Integrator.RK4)
-    env.unwrapped.scan_simulator = RaceCar.scan_simulator
-    sim = env.unwrapped.sim
+    env.scan_simulator = RaceCar.scan_simulator
+    sim = env.sim
 
     # Car-to-car collisions: replace the GJK check with "nobody touching".
     # Wall collisions are checked separately per car and still apply.
@@ -304,106 +301,6 @@ def best_from_saved(path):
             scores = [float(r['score']) for r in csv.DictReader(f)]
         best = int(np.argmax(scores))
     return controllers[best].net.get_params(), hidden
-
-
-# Each worker process keeps its envs between calls so a track's map is only
-# loaded once per group. The cache is dropped when the group changes.
-_envs = {}
-_envs_group = None
-
-
-def _quiet_worker():
-    """@brief Pool initializer: silence the repeated RK4 integrator warning."""
-    # Every env build warns that RK4 is the integrator; once is plenty.
-    warnings.filterwarnings('ignore', message='Chosen integrator is RK4')
-
-
-def _race_track(job):
-    """@brief Race a chunk of the population on one track. Runs in a worker process.
-
-    @param job Tuple (group, track, lo, map_path, start_pose, params, hidden, max_steps).
-    @return tuple (track, lo, results).
-    """
-    global _envs_group
-    group, track, lo, map_path, start_pose, params, hidden, max_steps = job
-    if group != _envs_group:
-        _envs.clear()
-        _envs_group = group
-    n = len(params)
-    if (map_path, n) not in _envs:
-        _envs[(map_path, n)] = make_ghost_env(map_path, n)
-    env = _envs[(map_path, n)]
-
-    controllers = []
-    for p in params:
-        c = NNController(hidden=hidden)
-        c.net.set_params(p)
-        controllers.append(c)
-    results, _ = race(env, controllers, start_pose, max_steps, render=False)
-    return track, lo, results
-
-
-def choose_workers(requested, n_races):
-    """@brief Pick the worker count: `requested`, or 75% of the CPU threads when 0 (at least 1).
-
-    More workers than car-races would only sit idle.
-
-    @param requested Requested workers (0 for the default).
-    @param n_races   Number of car-races available to share.
-    @return int Worker count.
-    """
-    default = max(1, (os.cpu_count() or 1) * 3 // 4)
-    return min(requested or default, n_races)
-
-
-def make_pool(workers):
-    """@brief Create the worker process pool.
-
-    @param workers Number of processes.
-    @return multiprocessing.Pool
-    """
-    return Pool(workers, initializer=_quiet_worker)
-
-
-def split_jobs(n_cars, n_tracks, workers):
-    """@brief Slices (lo, hi) of the population that each track is split into.
-
-    The work is n_cars * n_tracks car-races, shared as evenly as possible over
-    the workers: each job races cars_per_job cars on one track (a job cannot
-    span tracks, since it runs in one env).
-
-    @param n_cars   Population size.
-    @param n_tracks Tracks raced at once.
-    @param workers  Worker processes.
-    @return list of (lo, hi) pairs.
-    """
-    cars_per_job = -(-n_cars * n_tracks // workers)  # ceil
-    bounds = np.linspace(0, n_cars, -(-n_cars // cars_per_job) + 1).astype(int)
-    return list(zip(bounds[:-1], bounds[1:]))
-
-
-def race_tracks(pool, group, tracks, all_tracks, params, hidden, max_steps, workers):
-    """@brief Race every car on every track.
-
-    The cars are ghosts to each other, so splitting them across processes does
-    not change any car's result, only how many cores share the work.
-
-    @param pool       Worker pool from make_pool().
-    @param group      Cache key; worker env caches reset when it changes.
-    @param tracks     Track names to race.
-    @param all_tracks Result of load_tracks().
-    @param params     Array (cars, P) of flat weight vectors.
-    @param hidden     Hidden layer sizes.
-    @param max_steps  Step limit per race.
-    @param workers    Worker processes.
-    @return dict {track: [result dict per car]}.
-    """
-    jobs = [(group, t, lo, *all_tracks[t], params[lo:hi], hidden, max_steps)
-            for t in tracks for lo, hi in split_jobs(len(params), len(tracks), workers)]
-    per_track = {t: [None] * len(params) for t in tracks}
-    for t, lo, results in pool.imap_unordered(_race_track, jobs):
-        per_track[t][lo:lo + len(results)] = results
-    return per_track
 
 
 def main():

@@ -17,6 +17,7 @@ def get_config():
         - seed: seed for gen-0 nets and mutation noise
         - tracks: training tracks in order (None: every non-test track)
         - test_tracks: held-out tracks raced by the best car after every cycle
+        - val_tracks: validation tracks, used only by `python run.py --grid` to compare settings
         - shuffle_tracks: shuffle the training track order once at the start
         - load: path to a weights.npz / best.npz to start from (None: random)
         - show_track: track to render the final best car on
@@ -33,9 +34,32 @@ def get_config():
         'seed': 0,               # seed for gen-0 nets and mutation noise
         'tracks': None,          # training tracks, in order (None: every track that is not a test track)
         'test_tracks': ['YasMarina', 'Zandvoort'],  # held out; the best car races them after every cycle
+        'val_tracks': ['Monza', 'Spielberg'],  # validation set; only `run.py --grid` races it, never trained on
         'shuffle_tracks': False, # shuffle the training track order once at the start
         'load': None,            # path to a weights.npz / best.npz to start from (None: random nets)
         'show_track': None,      # track to render the final best car on (None: first test track; 'none': skip)
         'workers': 0,            # worker processes (0: 75% of CPU threads)
     }
     return CONFIG
+
+
+def get_grid():
+    """@brief Values that `python run.py --grid` tries for each setting.
+
+    Every combination of the listed values is trained and then scored on the
+    validation tracks (config: val_tracks). The number of runs is the product of
+    the list lengths, so keep the lists short. A setting with one value is held
+    fixed; a setting left out takes its value from get_config().
+
+    @return dict {setting name: list of values}. Names are keys of get_config():
+            n, gens_per_group, tracks_per_group, cycles, sigma, mutation_rate, max_time.
+    """
+    return {
+        'n': [200, 500],
+        'gens_per_group': [3, 5],
+        'tracks_per_group': [2],
+        'cycles': [2],
+        'sigma': [0.02, 0.05, 0.1],
+        'mutation_rate': [0.25, 1.0],
+        'max_time': [60.0],
+    }
