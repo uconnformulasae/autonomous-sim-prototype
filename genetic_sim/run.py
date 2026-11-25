@@ -50,6 +50,13 @@ stopped with Ctrl+C keeps everything up to the last finished generation):
 All settings live in config.py (each key is commented there):
 
     python run.py            train once with get_config()
+    python run.py --resume runs/<run>/best.npz
+                             continue from saved weights with that run's exact settings
+                             (read from the config.json / best_config.json beside the
+                             file). Saved weights are the parents: a file with exactly n
+                             cars (population.npz) is generation 0 as it is, anything
+                             else (best.npz, best_cycleC.npz) is mutated into n cars.
+                             --load PATH in config.py does the same with the current config.
     python run.py --grid     grid search: train once per combination in get_grid(),
                              score each final best car on val_tracks (never trained
                              on), and save the best combination to
@@ -76,8 +83,8 @@ from config import get_config, get_grid
 from nn_controller import HERE, NNController, load_tracks
 from parallel import Racer
 from scoring import combine_scores
-from testing_env import (TIMESTEP, best_from_saved, make_population, show_best,
-                         write_population)
+from testing_env import (TIMESTEP, best_from_saved, load_population, make_population,
+                         show_best, write_population)
 
 
 def fail(msg):
@@ -119,11 +126,18 @@ def initial_population(args, rng):
 
     @param args Settings.
     @param rng  numpy Generator for the mutation noise.
+    @note A saved file with exactly args.n cars is used as generation 0 directly;
+          otherwise its best car is mutated into n cars.
     @return tuple (population array (n, P), hidden layer sizes).
     """
     if args.load:
-        best_params, hidden = best_from_saved(args.load)
-        population = mutate(best_params, args.n, args.sigma, args.mutation_rate, rng)
+        saved, _ = load_population(args.load)
+        if len(saved) == args.n:  # a whole saved population: carry on from it unchanged
+            population = np.stack([c.net.get_params() for c in saved])
+            hidden = tuple(W.shape[1] for W in saved[0].net.weights[:-1])
+        else:
+            best_params, hidden = best_from_saved(args.load)
+            population = mutate(best_params, args.n, args.sigma, args.mutation_rate, rng)
     else:
         controllers, _ = make_population(args.n, args.seed)
         hidden = tuple(W.shape[1] for W in controllers[0].net.weights[:-1])
@@ -454,14 +468,43 @@ def grid_search(racer, base, grid, track_names, all_tracks):
         + ', '.join(f'{k}={best_combo[k]!r}' for k in grid) + f'\nSaved to {run_dir}')
 
 
+def saved_config(weights):
+    """@brief The settings a saved weights file was trained with.
+
+    @param weights Path to an .npz from a run or grid search folder.
+    @return dict Settings from config.json or best_config.json beside the file.
+    """
+    folder = os.path.dirname(os.path.abspath(weights))
+    for name in ('config.json', 'best_config.json'):
+        path = os.path.join(folder, name)
+        if os.path.exists(path):
+            with open(path) as f:
+                cfg = json.load(f)
+            cfg.pop('val_score', None)
+            return cfg
+    fail(f'no config.json or best_config.json next to {weights}')
+
+
 def main():
     """@brief Train with the config, or with --grid search the config grid."""
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--grid', action='store_true',
                         help='try every combination in config.get_grid() and keep the one that validates best')
-    use_grid = parser.parse_args().grid
+    parser.add_argument('--resume', metavar='WEIGHTS',
+                        help='start from saved weights (.npz) as the parents, using the exact '
+                             'settings of the run they came from')
+    cli = parser.parse_args()
+    use_grid = cli.grid
+    if use_grid and cli.resume:
+        fail('--resume and --grid cannot be combined')
 
     base = get_config()
+    if cli.resume:
+        if not os.path.exists(cli.resume):
+            fail(f'--resume file not found: {cli.resume}')
+        base = {**base, **saved_config(cli.resume), 'load': os.path.abspath(cli.resume)}
+        print(f'Resuming from {cli.resume} with the settings of the run it came from (n={base["n"]}, '
+              f'sigma={base["sigma"]}, mutation_rate={base["mutation_rate"]}, seed={base["seed"]})')
     args = SimpleNamespace(**base)
     all_tracks = load_tracks()
     track_names = check_config(args, all_tracks)
