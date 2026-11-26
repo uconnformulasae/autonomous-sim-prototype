@@ -67,7 +67,7 @@ This races 10 random cars on one track in a render window. Add `--headless` for 
 
 ### 5. Train a controller
 
-The controller is a small neural net whose weights are evolved: each generation races a population of cars, the best car is kept, and mutated copies of it become the next generation. All commands below are run from the repository root with the environment active. Paths are shown for Windows; on macOS/Linux use `/` instead of `\`.
+The controller is a small neural net whose weights are evolved: each generation races a population of cars, the best car is kept, and mutated copies of it become the next generation. All commands below are run from the repository root with the environment active. Forward slashes work in every shell, including Windows PowerShell and cmd; use `python3` instead of `python` if that is how Python 3.10 is named on your system.
 
 Tracks are split three ways, and the test and validation tracks are never trained on:
 
@@ -82,7 +82,7 @@ Tracks are split three ways, and the test and validation tracks are never traine
 **Step 2 (optional): grid search for good settings.** Trains once per combination in `get_grid()`, scores each result on the validation tracks, and saves the best one:
 
 ```
-python genetic_sim\run.py --grid
+python genetic_sim/run.py --grid
 ```
 
 Output goes to `genetic_sim/runs/gridsearch_<timestamp>/`: `grid_search.log`, `best_config.json` (the winning settings) and `best.npz` (its weights). Copy the winning values into `get_config()` for step 3.
@@ -90,7 +90,7 @@ Output goes to `genetic_sim/runs/gridsearch_<timestamp>/`: `grid_search.log`, `b
 **Step 3: train.**
 
 ```
-python genetic_sim\run.py
+python genetic_sim/run.py
 ```
 
 Output goes to `genetic_sim/runs/genetic_<timestamp>/`, rewritten every generation, so stopping with Ctrl+C keeps everything up to the last finished generation:
@@ -109,15 +109,15 @@ When training ends, the final best car drives `show_track` in a render window. S
 **Step 4: continue from saved weights.** `--resume` starts a new run from existing weights, with the exact settings of the run they came from (read from the `config.json` or `best_config.json` beside the file, ignoring `config.py`):
 
 ```
-python genetic_sim\run.py --resume genetic_sim\runs\genetic_<timestamp>\best.npz
+python genetic_sim/run.py --resume genetic_sim/runs/genetic_<timestamp>/best.npz
 ```
 
-A single-car file (`best.npz`, `best_cycleN.npz`) becomes generation 0 as that car plus mutants of it. A file holding exactly `n` cars (`population.npz`) is used as generation 0 unchanged. A new `genetic_<timestamp>` folder is created and the old one is untouched. To resume with different settings instead, set `load` in `config.py` to the weights path and run `python genetic_sim\run.py`. `--resume` cannot be combined with `--grid`.
+A single-car file (`best.npz`, `best_cycleN.npz`) becomes generation 0 as that car plus mutants of it. A file holding exactly `n` cars (`population.npz`) is used as generation 0 unchanged. A new `genetic_<timestamp>` folder is created and the old one is untouched. To resume with different settings instead, set `load` in `config.py` to the weights path and run `python genetic_sim/run.py`. `--resume` cannot be combined with `--grid`.
 
 **Step 5: replay weights with visuals and scores.** `replay.py` drives a saved car on each track in the render window, then prints a score table and saves it as a csv next to the weights:
 
 ```
-python genetic_sim\replay.py genetic_sim\runs\genetic_<timestamp>\best.npz
+python genetic_sim/replay.py genetic_sim/runs/genetic_<timestamp>/best.npz
 ```
 
 | Option | Effect |
@@ -132,7 +132,7 @@ python genetic_sim\replay.py genetic_sim\runs\genetic_<timestamp>\best.npz
 | `--headless` | No window, scores only (much faster) |
 | `--no-save` | Do not write the results csv |
 
-Closing the window ends the visuals; the remaining tracks are still scored without it. To watch a saved car on one track in the original multi-car viewer instead, use `python genetic_sim\testing_env.py --load <weights.npz> --map Monza`.
+Closing the window ends the visuals; the remaining tracks are still scored without it. To watch a saved car on one track in the original multi-car viewer instead, use `python genetic_sim/testing_env.py --load <weights.npz> --map Monza`.
 
 A typical workflow is: grid search, copy the best settings into `config.py`, train, replay `best.npz` with `--val` to check it generalises, then `--resume` to train further.
 

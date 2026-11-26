@@ -24,15 +24,46 @@ SCORE_PER_STEP = 1.0
 A_MAX = 9.51  # m/s^2, env's max acceleration; used to normalise deceleration
 LIDAR_FOV = 4.7  # rad, env's default scan field of view
 FRONT_HALF_ANGLE = np.radians(10)  # beams within this of straight ahead count as "ahead"
-BRAKE_DECEL = 6.0  # m/s^2, braking assumed when working out a safe speed
+BRAKE_DECEL = 3.5  # m/s^2, braking assumed when working out a safe speed (gentle, so braking starts early)
 STOP_MARGIN = 0.5  # m, gap to leave in front of the car when stopped
-STRAIGHT_CLEARANCE = 10.0  # m, free space ahead that counts as a straight
-FAST_PENALTY = 0.3  # per step, at a full SPEED_MAX over the safe speed
+A_LAT = 5.0  # m/s^2, sideways acceleration assumed for a safe corner speed
+TURN_CONE = np.radians(75)  # the car looks this far either side of straight ahead for the way on
+MIN_TARGET_DIST = 3.0  # m, shortest distance used when working out how tight a turn is
+STRAIGHT_CLEARANCE = 15.0  # m, free space ahead that counts as a straight
+FAST_PENALTY = 0.8  # per step, at a full SPEED_MAX over the safe speed
 SLOW_PENALTY = 0.3  # per step, braking at A_MAX on a straight
-CRASH_FACTOR = 0.5  # a crash keeps this fraction of the score
+CRASH_FACTOR = 0.25  # a crash keeps this fraction of the score
 
 _front = int(FRONT_HALF_ANGLE / LIDAR_FOV * NUM_BEAMS)
 FRONT_BEAMS = slice(NUM_BEAMS // 2 - _front, NUM_BEAMS // 2 + _front + 1)
+
+# Beam angles (rad, 0 = straight ahead) and the beams that look ahead and to the sides.
+_BEAM_ANGLES = np.linspace(-LIDAR_FOV / 2, LIDAR_FOV / 2, NUM_BEAMS)
+_CONE = np.flatnonzero(np.abs(_BEAM_ANGLES) <= TURN_CONE)
+_CONE_ANGLES = _BEAM_ANGLES[_CONE]
+
+
+def turn_speed(scans):
+    """@brief Fastest speed the car can take the bend ahead at, from where the LiDAR sees open space.
+
+    The farthest-looking beam within TURN_CONE of straight ahead is taken as the
+    way on. A circle that starts along the car's heading and reaches that point,
+    at distance D and angle phi off the heading, has curvature 2 sin(phi) / D, so
+    the speed that keeps the sideways acceleration within A_LAT is
+    sqrt(A_LAT * D / (2 sin(phi))). A straight (phi near 0) puts no limit on it,
+    and a hairpin (large phi, short D) gives a low one. Stopping distance alone
+    cannot see this: a wall can be far enough to stop in and the turn still too tight.
+
+    @param scans LiDAR ranges, shape (cars, NUM_BEAMS).
+    @return ndarray Speed limit per car (m/s), inf on a straight.
+    """
+    cone = scans[:, _CONE]
+    way_on = cone.argmax(axis=1)
+    dist = np.maximum(cone[np.arange(len(cone)), way_on], MIN_TARGET_DIST)
+    sin_phi = np.abs(np.sin(_CONE_ANGLES[way_on]))
+    curvature = 2.0 * sin_phi / dist
+    with np.errstate(divide='ignore'):
+        return np.sqrt(A_LAT / curvature)
 
 
 def update_score(score, alive, crashed, scans, speed, prev_speed, step_dist, dt):
@@ -48,18 +79,23 @@ def update_score(score, alive, crashed, scans, speed, prev_speed, step_dist, dt)
     @param dt         Physics timestep (s).
 
     Free space straight ahead in the LiDAR tells a turn from a straight: a wall
-    close ahead means a turn is coming. Too fast is faster than the car could
-    stop in that space; on a straight, any braking is penalised. A crash cuts
-    the score by CRASH_FACTOR.
+    close ahead means a turn is coming. The safe speed is the lower of two limits:
+    the speed the car could stop from in the free space ahead (BRAKE_DECEL), and
+    the speed it could take the bend at, from how far round the open space is
+    (turn_speed()). Faster than that is too fast. On a straight, braking is
+    penalised unless the car is already over the safe speed. A crash cuts the
+    score by CRASH_FACTOR.
     """
     ahead = scans[:, FRONT_BEAMS].min(axis=1)
     progress = SCORE_PER_STEP * step_dist / (SPEED_MAX * dt)
 
-    safe_speed = np.sqrt(2 * BRAKE_DECEL * np.maximum(ahead - STOP_MARGIN, 0.0))
+    stop_speed = np.sqrt(2 * BRAKE_DECEL * np.maximum(ahead - STOP_MARGIN, 0.0))
+    safe_speed = np.minimum(stop_speed, turn_speed(scans))
     too_fast = np.clip((speed - safe_speed) / SPEED_MAX, 0.0, 1.0)
 
+    # Braking is only free when a turn is coming: not on a straight, unless already over the safe speed.
     decel = np.clip((prev_speed - speed) / (A_MAX * dt), 0.0, 1.0)
-    slowing_on_straight = np.where(ahead > STRAIGHT_CLEARANCE, decel, 0.0)
+    slowing_on_straight = np.where((ahead > STRAIGHT_CLEARANCE) & (speed <= safe_speed), decel, 0.0)
 
     step = progress - FAST_PENALTY * too_fast - SLOW_PENALTY * slowing_on_straight
     score[alive] += step[alive]
