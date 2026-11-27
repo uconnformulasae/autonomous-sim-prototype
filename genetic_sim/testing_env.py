@@ -112,7 +112,8 @@ def load_population(path):
         c = NNController(hidden=tuple(data['layer_sizes'][1:-1]))
         c.net.set_params(params)
         controllers.append(c)
-    return controllers, list(data['seeds'])
+    seeds = list(data['seeds']) if 'seeds' in data.files else list(range(len(controllers)))
+    return controllers, seeds
 
 
 def save_weights(path, controllers, seeds):
@@ -124,10 +125,12 @@ def save_weights(path, controllers, seeds):
     """
     first = controllers[0].net
     layer_sizes = [first.weights[0].shape[0]] + [W.shape[1] for W in first.weights]
-    np.savez(path,
+    tmp = os.path.splitext(path)[0] + '.tmp.npz'  # write then rename, so a crash never leaves a half file
+    np.savez(tmp,
              params=np.stack([c.net.get_params() for c in controllers]),
              layer_sizes=np.array(layer_sizes),
              seeds=np.array(seeds))
+    os.replace(tmp, path)
 
 
 def make_ghost_env(map_path, n):
@@ -295,10 +298,23 @@ def best_from_saved(path):
     controllers, _ = load_population(path)
     hidden = tuple(np.load(path)['layer_sizes'][1:-1])
     best = 0
-    results_csv = os.path.join(os.path.dirname(path), 'results.csv')
+    folder = os.path.dirname(os.path.abspath(path))
+    results_csv = os.path.join(folder, 'results.csv')
+    generations_csv = os.path.join(folder, 'generations.csv')
+    scores = None
     if len(controllers) > 1 and os.path.exists(results_csv):
         with open(results_csv, newline='') as f:
             scores = [float(r['score']) for r in csv.DictReader(f)]
+    elif len(controllers) > 1 and os.path.exists(generations_csv):
+        # a training run's population.npz is the population of the last logged generation
+        with open(generations_csv, newline='') as f:
+            rows = list(csv.DictReader(f))
+        if rows:
+            last = max(int(r['gen']) for r in rows)
+            by_car = {int(r['car']): float(r['geom_mean']) for r in rows if int(r['gen']) == last}
+            if len(by_car) == len(controllers):
+                scores = [by_car[i] for i in range(len(controllers))]
+    if scores is not None and len(scores) == len(controllers):
         best = int(np.argmax(scores))
     return controllers[best].net.get_params(), hidden
 

@@ -104,6 +104,8 @@ def check_config(args, all_tracks):
     """
     if args.n < 2:
         fail('n must be at least 2')
+    if args.cycles < 1:
+        fail('cycles must be at least 1')
     test_tracks = args.test_tracks
     val_tracks = getattr(args, 'val_tracks', None) or []
     held_out = test_tracks + val_tracks
@@ -245,24 +247,81 @@ def init_run(args, track_names, n_groups, total_gens, hidden):
     @param hidden      Hidden layer sizes.
     @return str Path of the run directory.
     """
-    k = args.tracks_per_group
-    run_dir = os.path.join(HERE, 'runs', f'genetic_{time.strftime("%Y%m%d_%H%M%S")}')
-    os.makedirs(run_dir)
+    base = os.path.join(HERE, 'runs', f'genetic_{time.strftime("%Y%m%d_%H%M%S")}')
+    run_dir, suffix = base, 0
+    while True:  # two runs started in the same second must not share a folder
+        try:
+            os.makedirs(run_dir)
+            break
+        except FileExistsError:
+            suffix += 1
+            run_dir = f'{base}_{suffix}'
+    write_run_files(run_dir, args, {'track_order': track_names, 'groups': n_groups,
+                                    'total_generations': total_gens, 'hidden': hidden})
+    return run_dir
+
+
+def csv_headers(k):
+    """@brief Header row of each CSV in the run directory.
+
+    @param k Tracks per group.
+    @return dict {file name: header list}.
+    """
+    return {
+        'test.csv': ['cycle', 'gen', 'track', 'score', 'crashed', 'sim_time_s',
+                     'distance_m', 'median_speed_mps', 'laps'],
+        'history.csv': ['gen', 'group', 'tracks', 'best_car', 'best_score', 'mean_score',
+                        'best_track_scores', 'best_laps', 'best_crashes', 'wall_time_s'],
+        'generations.csv': ['gen', 'car', 'geom_mean'] + [f'track{i}' for i in range(k)] +
+                           [f'score{i}' for i in range(k)] + [f'crashed{i}' for i in range(k)],
+    }
+
+
+def write_run_files(run_dir, args, run_info):
+    """@brief Write config.json, run_info.json and the CSV headers into run_dir.
+
+    @param run_dir  Run directory (must exist).
+    @param args     Settings.
+    @param run_info Contents of run_info.json.
+    """
     with open(os.path.join(run_dir, 'config.json'), 'w') as f:
         json.dump(vars(args), f, indent=2)
     with open(os.path.join(run_dir, 'run_info.json'), 'w') as f:
-        json.dump({'track_order': track_names, 'groups': n_groups,
-                   'total_generations': total_gens, 'hidden': hidden}, f, indent=2)
-    with open(os.path.join(run_dir, 'test.csv'), 'w', newline='') as f:
-        csv.writer(f).writerow(['cycle', 'gen', 'track', 'score', 'crashed', 'sim_time_s',
-                                'distance_m', 'median_speed_mps', 'laps'])
-    with open(os.path.join(run_dir, 'history.csv'), 'w', newline='') as f:
-        csv.writer(f).writerow(['gen', 'group', 'tracks', 'best_car', 'best_score', 'mean_score',
-                                'best_track_scores', 'best_laps', 'best_crashes', 'wall_time_s'])
-    with open(os.path.join(run_dir, 'generations.csv'), 'w', newline='') as f:
-        csv.writer(f).writerow(['gen', 'car', 'geom_mean'] + [f'track{i}' for i in range(k)] +
-                               [f'score{i}' for i in range(k)] + [f'crashed{i}' for i in range(k)])
-    return run_dir
+        json.dump(run_info, f, indent=2)
+    for name, header in csv_headers(args.tracks_per_group).items():
+        with open(os.path.join(run_dir, name), 'w', newline='') as f:
+            csv.writer(f).writerow(header)
+
+
+def ensure_run_dir(run_dir, args, run_info):
+    """@brief Recreate the run directory (and its config and CSV headers) if it was deleted mid-run.
+
+    @param run_dir  Run directory.
+    @param args     Settings.
+    @param run_info Contents of run_info.json.
+    """
+    if not os.path.isdir(run_dir):
+        print(f'WARNING: run directory {run_dir} disappeared; recreating it. '
+              f'Logs from before this generation are lost.')
+        os.makedirs(run_dir, exist_ok=True)
+        write_run_files(run_dir, args, run_info)
+
+
+def append_csv(run_dir, name, k, rows):
+    """@brief Append rows to a CSV, writing its header first if the file is missing.
+
+    @param run_dir Run directory.
+    @param name    File name, a key of csv_headers().
+    @param k       Tracks per group.
+    @param rows    Iterable of row lists.
+    """
+    path = os.path.join(run_dir, name)
+    new = not os.path.exists(path)
+    with open(path, 'a', newline='') as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(csv_headers(k)[name])
+        w.writerows(rows)
 
 
 def log_generation(run_dir, gen, group, tracks, per_track, scores, geom_mean, best, wall):
@@ -285,19 +344,18 @@ def log_generation(run_dir, gen, group, tracks, per_track, scores, geom_mean, be
                       for s, r in zip(scores[:, best], best_runs))
           + f'  {wall:5.1f}s')
 
-    with open(os.path.join(run_dir, 'history.csv'), 'a', newline='') as f:
-        csv.writer(f).writerow([
-            gen, group, '|'.join(tracks), best, round(geom_mean[best], 3), round(geom_mean.mean(), 3),
-            '|'.join(f'{s:.3f}' for s in scores[:, best]),
-            '|'.join(str(r['laps']) for r in best_runs),
-            '|'.join(str(int(r['crashed'])) for r in best_runs),
-            round(wall, 2)])
-    with open(os.path.join(run_dir, 'generations.csv'), 'a', newline='') as f:
-        w = csv.writer(f)
-        for car in range(len(geom_mean)):
-            w.writerow([gen, car, round(geom_mean[car], 3)] + tracks +
-                       [round(s, 3) for s in scores[:, car]] +
-                       [int(per_track[t][car]['crashed']) for t in tracks])
+    k = len(tracks)
+    append_csv(run_dir, 'history.csv', k, [[
+        gen, group, '|'.join(tracks), best, round(geom_mean[best], 3), round(geom_mean.mean(), 3),
+        '|'.join(f'{s:.3f}' for s in scores[:, best]),
+        '|'.join(str(r['laps']) for r in best_runs),
+        '|'.join(str(int(r['crashed'])) for r in best_runs),
+        round(wall, 2)]])
+    append_csv(run_dir, 'generations.csv', k, (
+        [gen, car, round(geom_mean[car], 3)] + tracks +
+        [round(s, 3) for s in scores[:, car]] +
+        [int(per_track[t][car]['crashed']) for t in tracks]
+        for car in range(len(geom_mean))))
 
 
 def save_generation(run_dir, population, best_params, best_history, hidden):
@@ -313,8 +371,11 @@ def save_generation(run_dir, population, best_params, best_history, hidden):
     layer_sizes = np.array([net.weights[0].shape[0]] + [W.shape[1] for W in net.weights])
     write_population(os.path.join(run_dir, 'population.npz'), population, hidden)
     write_population(os.path.join(run_dir, 'best.npz'), best_params[None, :], hidden)
-    np.savez(os.path.join(run_dir, 'best_per_gen.npz'), params=np.stack(best_history),
-             layer_sizes=layer_sizes)
+    path = os.path.join(run_dir, 'best_per_gen.npz')
+    tmp = path[:-4] + '.tmp.npz'
+    np.savez(tmp, params=np.stack(best_history), layer_sizes=layer_sizes,
+             seeds=np.arange(len(best_history)))
+    os.replace(tmp, path)
 
 
 def run_test(racer, cache_key, cycle, gen, params, hidden, test_tracks, all_tracks, max_steps, run_dir):
@@ -336,14 +397,14 @@ def run_test(racer, cache_key, cycle, gen, params, hidden, test_tracks, all_trac
         return
     per_track = racer.race(cache_key, test_tracks, all_tracks, params[None, :], hidden, max_steps)
     print(f'----- TEST after cycle {cycle + 1} (best car of gen {gen}, weights not updated)')
-    with open(os.path.join(run_dir, 'test.csv'), 'a', newline='') as f:
-        w = csv.writer(f)
-        for t in test_tracks:
-            r = per_track[t][0]
-            print(f'      {t:14s} score {r["score"]:8.1f}  {"crashed" if r["crashed"] else "survived":8s}  '
-                  f't={r["sim_time_s"]:6.2f}s  dist={r["distance_m"]:7.1f}m  laps={r["laps"]}')
-            w.writerow([cycle + 1, gen, t, r['score'], int(r['crashed']), r['sim_time_s'],
-                        r['distance_m'], r['median_speed_mps'], r['laps']])
+    rows = []
+    for t in test_tracks:
+        r = per_track[t][0]
+        print(f'      {t:14s} score {r["score"]:8.1f}  {"crashed" if r["crashed"] else "survived":8s}  '
+              f't={r["sim_time_s"]:6.2f}s  dist={r["distance_m"]:7.1f}m  laps={r["laps"]}')
+        rows.append([cycle + 1, gen, t, r['score'], int(r['crashed']), r['sim_time_s'],
+                     r['distance_m'], r['median_speed_mps'], r['laps']])
+    append_csv(run_dir, 'test.csv', 0, rows)
 
 
 def train(racer, args, track_names, all_tracks, key=0, log=False):
@@ -369,6 +430,8 @@ def train(racer, args, track_names, all_tracks, key=0, log=False):
 
     run_dir = None
     best_history = []
+    run_info = {'track_order': track_names, 'groups': n_groups,
+                'total_generations': total_gens, 'hidden': hidden}
     if log:
         run_dir = init_run(args, track_names, n_groups, total_gens, hidden)
         if len(track_names) % k:
@@ -385,9 +448,11 @@ def train(racer, args, track_names, all_tracks, key=0, log=False):
             if g.gen % gens_per_cycle == 0:
                 print(f'===== cycle {g.cycle + 1}/{args.cycles}')
             best_history.append(g.best_params)
+            ensure_run_dir(run_dir, args, run_info)
+            # weights first: a logging failure must never cost the trained car
+            save_generation(run_dir, g.population, g.best_params, best_history, hidden)
             log_generation(run_dir, g.gen, g.group, g.tracks, g.per_track, g.scores, g.geom_mean,
                            g.best, g.wall)
-            save_generation(run_dir, g.population, g.best_params, best_history, hidden)
             if (g.gen + 1) % gens_per_cycle == 0:
                 run_test(racer, ('test', g.cycle), g.cycle, g.gen, g.best_params, hidden,
                          args.test_tracks, all_tracks, max_steps, run_dir)
