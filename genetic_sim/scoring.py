@@ -2,8 +2,9 @@
 @file scoring.py
 @brief Everything about scoring cars lives here.
 
- - update_score(): the scoring formula; edit it and the constants below to change
-   what the genetic run rewards
+ - update_general_score(): the general driving formula; edit it and the constants
+   below to change what the genetic run rewards
+ - update_race_score(): the pure-speed racing formula (distance minus a crash penalty)
  - ScoreKeeper: tracks each car's score, distance, speed and crash time during
    a race, and builds the results dicts at the end
  - combine_scores(): turns a car's scores on several tracks into one ranking score
@@ -66,7 +67,7 @@ def turn_speed(scans):
         return np.sqrt(A_LAT / curvature)
 
 
-def update_score(score, alive, crashed, scans, speed, prev_speed, step_dist, dt):
+def update_general_score(score,alive, crashed, scans, speed, prev_speed, step_dist, dt):
     """@brief Add this step's score to `score` in place. All arguments are arrays over cars.
 
     @param score      Running score per car (modified in place).
@@ -102,14 +103,38 @@ def update_score(score, alive, crashed, scans, speed, prev_speed, step_dist, dt)
     score[crashed] *= CRASH_FACTOR
 
 
+RACE_CRASH_PENALTY_S = 10.0  # a crash costs as much as this many seconds of driving at SPEED_MAX
+
+
+def update_race_score(race_score, alive, crashed, step_dist, dt):
+    """@brief Add this step's racing score to `race_score` in place. Arrays over cars.
+
+    The racing metric: it only cares about covering ground fast. Each step earns
+    step_dist / (SPEED_MAX * dt), i.e. 1 per step at full speed, with no safe-speed
+    or braking penalties, so a car that carries speed through corners and risks
+    the limit scores higher. A crash subtracts RACE_CRASH_PENALTY_S seconds' worth
+    of full-speed driving (the car also stops earning), so the score can go negative.
+
+    @param race_score Running racing score per car (modified in place).
+    @param alive      Cars still driving at the start of this step; only they score.
+    @param crashed    Cars that crashed during this step (a subset of alive).
+    @param step_dist  Distance driven during this step (m).
+    @param dt         Physics timestep (s).
+    """
+    race_score[alive] += (step_dist / (SPEED_MAX * dt))[alive]
+    race_score[crashed] -= RACE_CRASH_PENALTY_S / dt
+
+
 SCORE_FLOOR = 1e-3  # lowest per-track score that counts when multiplying across tracks
 
 
-def combine_scores(per_track, tracks):
+def combine_scores(per_track, tracks, metric='score'):
     """@brief Turn each car's per-track race scores into one score per car.
 
     @param per_track {track: [result dict per car]} as returned by Racer.race().
     @param tracks    The tracks to combine, in order.
+    @param metric    Which result key to rank by: 'score' (general driving) or
+                     'race_score' (pure speed, crash penalty).
     @return tuple (scores, geom_mean): scores is (len(tracks), n_cars), the raw
             score of each car on each track; geom_mean is (n_cars,), the number
             that ranks the cars.
@@ -122,7 +147,7 @@ def combine_scores(per_track, tracks):
     one track is nearly zeroed but can still be ranked by its other tracks.
     Edit this to change how tracks are combined.
     """
-    scores = np.array([[r['score'] for r in per_track[t]] for t in tracks])
+    scores = np.array([[r[metric] for r in per_track[t]] for t in tracks])
     geom_mean = np.exp(np.log(np.maximum(scores, SCORE_FLOOR)).mean(axis=0))
     return scores, geom_mean
 
@@ -147,6 +172,7 @@ class ScoreKeeper:
         self.death_time = np.full(n, np.nan)
         self.distance = np.zeros(n)
         self.score = np.zeros(n)
+        self.race_score = np.zeros(n)
         self.speeds = [[] for _ in range(n)]
         self._xy = np.column_stack([obs['poses_x'], obs['poses_y']])
         self._speed = np.abs(np.asarray(obs['linear_vels_x'], dtype=np.float64))
@@ -165,8 +191,9 @@ class ScoreKeeper:
         self._speed = np.abs(np.asarray(obs['linear_vels_x'], dtype=np.float64))
         scans = np.asarray(obs['scans'], dtype=np.float64)
         crashed = self.alive & np.asarray(obs['collisions'], dtype=bool)
-        update_score(self.score, self.alive, crashed, scans, self._speed, prev_speed,
+        update_general_score(self.score,self.alive, crashed, scans, self._speed, prev_speed,
                      step_dist, self.dt)
+        update_race_score(self.race_score, self.alive, crashed, step_dist, self.dt)
         for i in np.flatnonzero(self.alive):
             self.speeds[i].append(self._speed[i])
             if crashed[i]:
@@ -178,7 +205,7 @@ class ScoreKeeper:
 
         @param obs      Final observation (for lap counts).
         @param sim_time Total simulated time (s).
-        @return list One dict per car: score, crashed, death_time_s, sim_time_s,
+        @return list One dict per car: score, race_score, crashed, death_time_s, sim_time_s,
                 distance_m, median_speed_mps, laps.
         """
         results = []
@@ -186,6 +213,7 @@ class ScoreKeeper:
             crashed = not np.isnan(self.death_time[i])
             results.append({
                 'score': round(self.score[i], 3),
+                'race_score': round(self.race_score[i], 3),
                 'crashed': crashed,
                 'death_time_s': round(self.death_time[i], 3) if crashed else '',
                 'sim_time_s': round(self.death_time[i] if crashed else sim_time, 3),

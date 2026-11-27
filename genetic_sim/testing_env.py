@@ -39,7 +39,7 @@ import time
 import numpy as np
 
 from f110_gym.envs.base_classes import Integrator, RaceCar
-from nn_controller import HERE, NNController, load_tracks, make_env
+from nn_controller import HERE, NUM_BEAMS, BatchPlanner, NNController, load_tracks, make_env
 from scoring import ScoreKeeper
 
 
@@ -133,6 +133,26 @@ def save_weights(path, controllers, seeds):
     os.replace(tmp, path)
 
 
+def _use_scan_beams(num_beams):
+    """@brief Make every RaceCar built from now on use `num_beams` LiDAR beams.
+
+    The env has no setting for this (the car's default is 1080), so the car's
+    constructor is wrapped once to fill it in. Idempotent.
+
+    @param num_beams Beams per scan.
+    """
+    if getattr(RaceCar.__init__, '_beams', None) == num_beams:
+        return
+    original = getattr(RaceCar.__init__, '_original', RaceCar.__init__)
+
+    def init(self, *args, **kwargs):
+        kwargs.setdefault('num_beams', num_beams)
+        original(self, *args, **kwargs)
+
+    init._original, init._beams = original, num_beams
+    RaceCar.__init__ = init
+
+
 def make_ghost_env(map_path, n):
     """@brief Make an n-car env where the cars cannot collide with or see each other.
 
@@ -145,6 +165,7 @@ def make_ghost_env(map_path, n):
     # a simulator of its own, which race() swaps back in, so envs for different
     # tracks can live in one process without racing on each other's maps.
     RaceCar.scan_simulator = None
+    _use_scan_beams(NUM_BEAMS)
     env = make_env(map=map_path, map_ext='.png',
                    num_agents=n, timestep=TIMESTEP, integrator=Integrator.RK4)
     env.scan_simulator = RaceCar.scan_simulator
@@ -168,7 +189,7 @@ def _freeze_on_crash(agent):
     """@brief Stop simulating a car once it crashes.
 
     A crashed car sits still and nothing reads its scan (the scorer only looks
-    at living cars), so re-running its physics and 1080-beam LiDAR every step
+    at living cars), so re-running its physics and LiDAR every step
     is wasted work. After the first crash its last scan is replayed instead.
 
     @param agent The RaceCar to patch.
@@ -212,8 +233,7 @@ def race(env, controllers, start_pose, max_steps, render):
     n = len(controllers)
     RaceCar.scan_simulator = env.unwrapped.scan_simulator  # this env's map; see make_ghost_env
     obs, _, _, _ = env.reset(np.array([start_pose] * n))
-    for c in controllers:
-        c.reset()
+    planner = BatchPlanner(controllers)  # all cars' nets in one batched forward pass
 
     scorer = ScoreKeeper(n, obs, TIMESTEP)
     alive = scorer.alive
@@ -225,9 +245,7 @@ def race(env, controllers, start_pose, max_steps, render):
     steps = 0
     # The env's own done flag only tracks car 0, so it is ignored here.
     while alive.any() and steps < max_steps:
-        actions = np.zeros((n, 2))  # crashed cars get [0, 0] and stay put
-        for i in np.flatnonzero(alive):
-            actions[i] = controllers[i].plan(obs, agent=i)
+        actions = planner.plan(obs, alive)  # crashed cars get [0, 0] and stay put
         obs, step_reward, _, _ = env.step(actions)
         sim_time += step_reward
         steps += 1

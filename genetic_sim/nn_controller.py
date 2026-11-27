@@ -67,9 +67,9 @@ def load_tracks():
 S_MIN, S_MAX = -0.4189, 0.4189  # steering angle (rad)
 SPEED_MIN, SPEED_MAX = 0.5, 8.0  # commanded speed (m/s); capped below v_max for a sane draft
 LIDAR_MAX_RANGE = 30.0  # m, scanner max range
-NUM_BEAMS = 1080
-LIDAR_BINS = 54  # 1080 / 54 = 20 beams per bin
-
+NUM_BEAMS = 108  # LiDAR beams per scan; ray casting dominates run time, so fewer is much faster (the env's default is 1080)
+LIDAR_BINS = 54  # network inputs; NUM_BEAMS must be a multiple of this
+assert NUM_BEAMS % LIDAR_BINS == 0, 'NUM_BEAMS must be a multiple of LIDAR_BINS'
 
 class MLP:
     """@brief Fully connected net with tanh hidden layers and a linear output layer."""
@@ -174,6 +174,79 @@ class NNController:
 
         self.prev_steer, self.prev_speed = steer, speed
         return steer, speed
+
+
+class BatchPlanner:
+    """@brief Runs many NNControllers' nets at once, same maths as NNController.plan().
+
+    The weights of all cars are stacked per layer, so one batched matmul replaces
+    a Python loop of tiny single-car forward passes. All nets must have the same
+    layer sizes. Previous steer/speed are kept here, not in the controllers.
+    """
+
+    # When fewer than this fraction of cars are alive, only those are computed.
+    SUBSET_BELOW = 0.25
+
+    def __init__(self, controllers):
+        """@brief Stack the controllers' weights.
+
+        @param controllers List of NNController with identical architectures.
+        """
+        nets = [c.net for c in controllers]
+        self.n = len(nets)
+        self.W = [np.stack([net.weights[k] for net in nets]) for k in range(len(nets[0].weights))]
+        self.b = [np.stack([net.biases[k] for net in nets])[:, None, :] for k in range(len(nets[0].weights))]
+        self.reset()
+
+    def reset(self):
+        """@brief Clear the remembered previous steer and speed (call before a race)."""
+        self.prev_steer = np.zeros(self.n)
+        self.prev_speed = np.zeros(self.n)
+
+    def plan(self, obs, alive):
+        """@brief Choose actions for every living car.
+
+        @param obs   Gym observation dict (arrays over cars).
+        @param alive Boolean array, which cars to plan for.
+        @return ndarray Actions (n, 2) = [steer rad, speed m/s]; zero for cars not alive.
+        """
+        idx = np.flatnonzero(alive)
+        actions = np.zeros((self.n, 2))
+        if len(idx) == 0:
+            return actions
+        subset = len(idx) < self.SUBSET_BELOW * self.n
+        sel = idx if subset else slice(None)
+
+        scans = np.asarray(obs['scans'], dtype=np.float64)[sel]
+        lidar = np.clip(scans.reshape(len(scans), LIDAR_BINS, -1).min(axis=2) / LIDAR_MAX_RANGE, 0.0, 1.0)
+        state = np.stack([
+            np.asarray(obs['linear_vels_x'], dtype=np.float64)[sel] / SPEED_MAX,
+            np.asarray(obs['ang_vels_z'], dtype=np.float64)[sel] / 5.0,
+            self.prev_steer[sel] / S_MAX,
+            self.prev_speed[sel] / SPEED_MAX,
+        ], axis=1)
+        x = np.concatenate([lidar, state], axis=1)[:, None, :]  # (cars, 1, inputs)
+
+        last = len(self.W) - 1
+        for k in range(last + 1):
+            W = self.W[k][idx] if subset else self.W[k]
+            b = self.b[k][idx] if subset else self.b[k]
+            x = x @ W + b
+            if k < last:
+                x = np.tanh(x)
+        raw = x[:, 0, :]
+
+        steer = S_MIN + (np.tanh(raw[:, 0]) + 1.0) * 0.5 * (S_MAX - S_MIN)
+        speed = SPEED_MIN + (1.0 / (1.0 + np.exp(-raw[:, 1]))) * (SPEED_MAX - SPEED_MIN)
+
+        if subset:
+            actions[idx, 0], actions[idx, 1] = steer, speed
+            self.prev_steer[idx], self.prev_speed[idx] = steer, speed
+        else:
+            keep = alive.astype(bool)
+            actions[keep, 0], actions[keep, 1] = steer[keep], speed[keep]
+            self.prev_steer[keep], self.prev_speed[keep] = steer[keep], speed[keep]
+        return actions
 
 
 def main():

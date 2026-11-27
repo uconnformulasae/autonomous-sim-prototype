@@ -227,7 +227,7 @@ def evolve(racer, args, track_names, all_tracks, population, hidden, rng, key=0)
         tracks = track_group(track_names, group % n_groups, k)
         start = time.time()
         per_track = racer.race((key, group), tracks, all_tracks, population, hidden, max_steps)
-        scores, geom_mean = combine_scores(per_track, tracks)
+        scores, geom_mean = combine_scores(per_track, tracks, args.score_metric)
         best = int(np.argmax(geom_mean))
         best_params = population[best].copy()
         yield SimpleNamespace(gen=gen, group=group, cycle=gen // gens_per_cycle, tracks=tracks,
@@ -489,7 +489,7 @@ def validate(racer, base, params, hidden, all_tracks, key):
     val = base['val_tracks']
     per_track = racer.race(key, val, all_tracks, params[None, :], hidden,
                            int(base['max_time'] / TIMESTEP))
-    _, geom_mean = combine_scores(per_track, val)
+    _, geom_mean = combine_scores(per_track, val, base.get('score_metric', 'score'))
     return float(geom_mean[0]), [per_track[t][0] for t in val]
 
 

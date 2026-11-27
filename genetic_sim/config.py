@@ -18,6 +18,7 @@ def get_config():
         - tracks: training tracks in order (None: every non-test track)
         - test_tracks: held-out tracks raced by the best car after every cycle
         - val_tracks: validation tracks, used only by `python run.py --grid` to compare settings
+        - score_metric: 'score' (general driving) or 'race_score' (pure speed, crash penalty)
         - shuffle_tracks: shuffle the training track order once at the start
         - load: path to a weights.npz / best.npz to start from (None: random)
         - show_track: track to render the final best car on
@@ -35,6 +36,7 @@ def get_config():
         'tracks': None,          # training tracks, in order (None: every track that is not a test track)
         'test_tracks': ['YasMarina', 'Zandvoort'],  # held out; the best car races them after every cycle
         'val_tracks': ['Monza', 'Spielberg'],  # validation set; only `run.py --grid` races it, never trained on
+        'score_metric': 'race_score', # what training ranks cars by: 'score' (general driving) or 'race_score' (pure speed, crash penalty)
         'shuffle_tracks': False, # shuffle the training track order once at the start
         'load': None,            # path to a weights.npz / best.npz to start from (None: random nets)
         'show_track': None,      # track to render the final best car on (None: first test track; 'none': skip)
