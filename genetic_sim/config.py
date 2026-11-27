@@ -26,9 +26,9 @@ def get_config():
     """
     CONFIG = {
         'n': 500,                # cars per generation
-        'gens_per_group': 5,     # generations on each group of tracks before moving to the next
+        'gens_per_group': 3,     # generations on each group of tracks before moving to the next
         'tracks_per_group': 2,   # tracks raced in parallel each generation
-        'cycles': 2,             # passes through all the training groups
+        'cycles': 6,             # passes through all the training groups
         'sigma': 0.05,           # std of the Gaussian noise added to mutated weights
         'mutation_rate': 1.0,    # fraction of weights that get noise in each mutant
         'max_time': 60.0,        # sim seconds per race
